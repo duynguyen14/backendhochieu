@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from app.services.image_path_service import resolve_record_image_path
 from app.services.passport_review_service import (
     PASSPORT_FIELD_KEYS,
     get_passport_record_detail,
@@ -100,7 +101,7 @@ def get_passport_record_image(record_id: int):
     if record is None:
         raise HTTPException(status_code=404, detail="Record not found")
 
-    image_path = Path(record["image_path"])
+    image_path = resolve_record_image_path(record["image_path"])
     if not image_path.exists():
         raise HTTPException(status_code=404, detail="Image file not found")
 
@@ -121,7 +122,7 @@ def get_passport_record_ocr_overlay(record_id: int):
     if record is None:
         raise HTTPException(status_code=404, detail="Record not found")
 
-    image_path = Path(record["image_path"])
+    image_path = resolve_record_image_path(record["image_path"])
     if not image_path.exists():
         raise HTTPException(status_code=404, detail="Image file not found")
 

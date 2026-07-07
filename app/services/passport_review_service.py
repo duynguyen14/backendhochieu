@@ -16,6 +16,7 @@ from app.repositories import (
     update_layoutlm_reviewed_json,
     update_reviewed_record,
 )
+from app.services.image_path_service import resolve_record_image_path
 from app.services.layoutlm_service import get_layoutlm_detail, normalize_layoutlm_payload
 from app.services.ocr_service import ensure_image_orientation
 
@@ -141,7 +142,7 @@ def _sync_record_orientation(record_id: int) -> None:
         if row is None:
             return
 
-        image_path = Path(str(row.image_path))
+        image_path = resolve_record_image_path(str(row.image_path))
         if not image_path.exists():
             return
 
@@ -196,7 +197,7 @@ def list_passport_records(*, page: int, page_size: int, status: str | None = Non
         items.append(
             {
                 "id": int(row.id),
-                "image_path": str(row.image_path),
+                "image_path": str(resolve_record_image_path(str(row.image_path))),
                 "image_name": Path(str(row.image_path)).name,
                 "status": str(row.status),
                 "created_at": _serialize_datetime(row.created_at),
@@ -238,7 +239,7 @@ def get_passport_record_detail(record_id: int) -> dict[str, Any] | None:
 
     response = {
         "id": int(row.id),
-        "image_path": str(row.image_path),
+        "image_path": str(resolve_record_image_path(str(row.image_path))),
         "image_name": Path(str(row.image_path)).name,
         "status": str(row.status),
         "created_at": _serialize_datetime(row.created_at),

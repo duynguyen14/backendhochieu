@@ -15,6 +15,7 @@ from app.repositories import (
     update_layoutlm_json,
     update_layoutlm_reviewed_json,
 )
+from app.services.image_path_service import resolve_record_image_path
 from app.services.ocr_service import run_ocr_with_boxes
 
 
@@ -292,7 +293,7 @@ def _build_layoutlm_for_rows(cursor: Any, rows: list[Any]) -> dict[str, int]:
     errors = 0
 
     for row in rows:
-        image_path = Path(str(row.image_path))
+        image_path = resolve_record_image_path(str(row.image_path))
         if not image_path.exists():
             errors += 1
             continue
@@ -320,7 +321,7 @@ def build_layoutlm_for_record(record_id: int) -> dict[str, Any] | None:
         if row is None:
             return None
 
-        image_path = Path(str(row.image_path))
+        image_path = resolve_record_image_path(str(row.image_path))
         if not image_path.exists():
             raise FileNotFoundError(f"Image file not found: {image_path}")
 
@@ -388,7 +389,7 @@ def get_layoutlm_detail(record_id: int) -> dict[str, Any] | None:
         if row is None:
             return None
 
-    image_path = Path(str(row.image_path))
+    image_path = resolve_record_image_path(str(row.image_path))
     image_width, image_height = 0, 0
     if image_path.exists():
         image_width, image_height = _get_image_size(image_path)
