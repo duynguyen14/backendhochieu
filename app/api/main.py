@@ -4,6 +4,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes.code_values import router as code_values_router
+from app.api.routes.mask_review import router as mask_review_router
+from app.api.routes.passport_inference import router as passport_inference_router
 from app.api.routes.passport_records import router as passport_records_router
 from app.config import get_frontend_allowed_origins
 
@@ -20,7 +22,9 @@ app.add_middleware(
 )
 
 app.include_router(passport_records_router, prefix="/api")
+app.include_router(passport_inference_router, prefix="/api")
 app.include_router(code_values_router, prefix="/api")
+app.include_router(mask_review_router, prefix="/api")
 
 
 @app.get("/health")

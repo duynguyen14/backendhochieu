@@ -11,7 +11,18 @@ DEFAULT_IMAGE_INPUT_DIR = BASE_DIR / "images"
 DEFAULT_RENAME_IMAGE_DIR = DEFAULT_IMAGE_INPUT_DIR
 DEFAULT_IMPORT_SOURCE_IMAGE_DIR = BASE_DIR / "imagesGoc"
 DEFAULT_IMPORT_TARGET_IMAGE_DIR = DEFAULT_IMAGE_INPUT_DIR
+DEFAULT_MLZ_MASK_INPUT_DIR = Path(r"C:\Users\Admin\Downloads\tonghop\tonghop\tonghop")
+DEFAULT_MLZ_MASK_OUTPUT_DIR = BASE_DIR.parent / "tonghop_mask"
+DEFAULT_MLZ_CROP_INPUT_DIR = Path(r"C:\Users\Admin\Downloads\tonghop\tonghop\tonghop")
+DEFAULT_MLZ_CROP_OUTPUT_DIR = BASE_DIR.parent / "tonghop_crop"
+DEFAULT_MLZ_METADATA_INPUT_PATH = DEFAULT_MLZ_MASK_INPUT_DIR / "metadata.jsonl"
+DEFAULT_MASK_REVIEW_IMAGE_DIR = DEFAULT_MLZ_MASK_OUTPUT_DIR
+DEFAULT_MASK_REVIEW_ERROR_DIR = BASE_DIR.parent / "tong_hop_mask_loi"
+DEFAULT_MASK_REVIEW_STATE_PATH = DEFAULT_MASK_REVIEW_IMAGE_DIR / "review_state.json"
 DEFAULT_LOG_DIR = BASE_DIR / "logs"
+DEFAULT_DONUT_MODEL_DIR = BASE_DIR / "models" / "donut" / "checkpoint-16180"
+DEFAULT_DONUT_PROCESSOR_DIR = BASE_DIR / "models" / "donut" / "processor"
+DEFAULT_INFERENCE_UPLOAD_DIR = BASE_DIR / "uploads" / "passport_inference"
 
 
 def load_env_file(env_file_path: Path = ENV_FILE_PATH) -> None:
@@ -94,9 +105,124 @@ def get_import_target_image_dir() -> Path:
     return Path(configured_path).expanduser().resolve()
 
 
+def get_mlz_mask_input_dir() -> Path:
+    configured_path = get_env_value(
+        "MLZ_MASK_INPUT_DIR",
+        str(DEFAULT_MLZ_MASK_INPUT_DIR),
+    )
+    return Path(configured_path).expanduser().resolve()
+
+
+def get_mlz_mask_output_dir() -> Path:
+    configured_path = get_env_value(
+        "MLZ_MASK_OUTPUT_DIR",
+        str(DEFAULT_MLZ_MASK_OUTPUT_DIR),
+    )
+    return Path(configured_path).expanduser().resolve()
+
+
+def get_mlz_crop_input_dir() -> Path:
+    configured_path = get_env_value(
+        "MLZ_CROP_INPUT_DIR",
+        str(DEFAULT_MLZ_CROP_INPUT_DIR),
+    )
+    return Path(configured_path).expanduser().resolve()
+
+
+def get_mlz_crop_output_dir() -> Path:
+    configured_path = get_env_value(
+        "MLZ_CROP_OUTPUT_DIR",
+        str(DEFAULT_MLZ_CROP_OUTPUT_DIR),
+    )
+    return Path(configured_path).expanduser().resolve()
+
+
+def get_mlz_metadata_input_path() -> Path:
+    configured_path = get_env_value(
+        "MLZ_METADATA_INPUT_PATH",
+        str(DEFAULT_MLZ_METADATA_INPUT_PATH),
+    )
+    return Path(configured_path).expanduser().resolve()
+
+
+def get_mask_review_image_dir() -> Path:
+    configured_path = get_env_value(
+        "MASK_REVIEW_IMAGE_DIR",
+        str(DEFAULT_MASK_REVIEW_IMAGE_DIR),
+    )
+    return Path(configured_path).expanduser().resolve()
+
+
+def get_mask_review_error_dir() -> Path:
+    configured_path = get_env_value(
+        "MASK_REVIEW_ERROR_DIR",
+        str(DEFAULT_MASK_REVIEW_ERROR_DIR),
+    )
+    return Path(configured_path).expanduser().resolve()
+
+
+def get_mask_review_state_path() -> Path:
+    configured_path = get_env_value(
+        "MASK_REVIEW_STATE_PATH",
+        str(DEFAULT_MASK_REVIEW_STATE_PATH),
+    )
+    return Path(configured_path).expanduser().resolve()
+
+
 def get_log_dir() -> Path:
     configured_path = get_env_value("APP_LOG_DIR", str(DEFAULT_LOG_DIR))
     return Path(configured_path).expanduser().resolve()
+
+
+def get_donut_model_dir() -> Path:
+    configured_path = get_env_value("DONUT_MODEL_DIR", str(DEFAULT_DONUT_MODEL_DIR))
+    return Path(configured_path).expanduser().resolve()
+
+
+def get_donut_processor_dir() -> Path:
+    configured_path = get_env_value("DONUT_PROCESSOR_DIR", str(DEFAULT_DONUT_PROCESSOR_DIR))
+    return Path(configured_path).expanduser().resolve()
+
+
+def get_donut_task_prompt() -> str:
+    return get_env_value("DONUT_TASK_PROMPT", "<s_passport>")
+
+
+def get_donut_max_new_tokens() -> int:
+    return int(get_env_value("DONUT_MAX_NEW_TOKENS", "256"))
+
+
+def get_donut_cpu_threads() -> int:
+    return max(1, int(get_env_value("DONUT_CPU_THREADS", "4")))
+
+
+def get_donut_device() -> str:
+    return get_env_value("DONUT_DEVICE", "auto").lower()
+
+
+def get_donut_cache_size() -> int:
+    return max(1, int(get_env_value("DONUT_CACHE_SIZE", "32")))
+
+
+def get_inference_upload_dir() -> Path:
+    configured_path = get_env_value("INFERENCE_UPLOAD_DIR", str(DEFAULT_INFERENCE_UPLOAD_DIR))
+    return Path(configured_path).expanduser().resolve()
+
+
+def get_inference_skip_ocr_auto_rotate() -> bool:
+    return get_bool_env("INFERENCE_SKIP_OCR_AUTO_ROTATE", False)
+
+
+def get_donut_inference_image_width() -> int:
+    return max(256, int(get_env_value("DONUT_INFERENCE_IMAGE_WIDTH", "2560")))
+
+
+def get_donut_inference_image_height() -> int:
+    return max(256, int(get_env_value("DONUT_INFERENCE_IMAGE_HEIGHT", "1920")))
+
+
+def get_donut_use_dynamic_quantization() -> bool:
+    return get_bool_env("DONUT_USE_DYNAMIC_QUANTIZATION", True)
 
 
 def get_ocr_language() -> str:

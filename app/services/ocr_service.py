@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import threading
@@ -33,9 +34,12 @@ from app.repositories import insert_error_record, insert_record, load_existing_r
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 DATE_PATTERN = re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b")
 PASSPORT_NUMBER_PATTERN = re.compile(r"\b[A-Z][0-9A-Z]{6,8}\b")
+WORD_SPLIT_PATTERN = re.compile(r"\S+")
 
 _OCR_PIPELINE: Any | None = None
 _OCR_PIPELINE_LOCK = threading.Lock()
+_OCR_FAST_PIPELINE: Any | None = None
+_OCR_FAST_PIPELINE_LOCK = threading.Lock()
 _DOC_PREPROCESSOR_PIPELINE: Any | None = None
 _DOC_PREPROCESSOR_LOCK = threading.Lock()
 _IMAGE_ORIENTATION_CHECK_CACHE: dict[str, tuple[int, int]] = {}
@@ -161,21 +165,21 @@ def _read_local_model_name(model_dir: Path) -> str | None:
     return match.group(1).strip()
 
 
-def _build_pipeline_kwargs() -> dict[str, Any]:
+def _build_pipeline_kwargs(*, fast_mode: bool = False) -> dict[str, Any]:
     os.environ["PADDLE_PDX_MODEL_SOURCE"] = get_paddle_model_source()
 
     kwargs: dict[str, Any] = {
         "lang": get_ocr_language(),
         "ocr_version": get_paddle_ocr_version(),
         "device": get_paddle_ocr_device(),
-        "use_doc_orientation_classify": get_paddle_use_doc_orientation_classify(),
+        "use_doc_orientation_classify": False if fast_mode else get_paddle_use_doc_orientation_classify(),
         "use_doc_unwarping": False,
-        "use_textline_orientation": get_paddle_use_textline_orientation(),
-        "return_word_box": False,
+        "use_textline_orientation": False if fast_mode else get_paddle_use_textline_orientation(),
+        "return_word_box": True,
     }
 
     doc_orientation_model_dir = get_paddle_doc_orientation_model_dir()
-    if doc_orientation_model_dir:
+    if doc_orientation_model_dir and not fast_mode:
         kwargs["doc_orientation_classify_model_dir"] = str(doc_orientation_model_dir)
 
     detection_model_dir = get_paddle_text_detection_model_dir()
@@ -193,7 +197,7 @@ def _build_pipeline_kwargs() -> dict[str, Any]:
         kwargs["text_recognition_model_dir"] = str(recognition_model_dir)
 
     textline_orientation_model_dir = get_paddle_textline_orientation_model_dir()
-    if textline_orientation_model_dir:
+    if textline_orientation_model_dir and not fast_mode:
         textline_orientation_model_name = _read_local_model_name(textline_orientation_model_dir)
         if textline_orientation_model_name:
             kwargs["textline_orientation_model_name"] = textline_orientation_model_name
@@ -230,6 +234,20 @@ def _get_ocr_pipeline():
             _OCR_PIPELINE = PaddleOCR(**_build_pipeline_kwargs())
 
     return _OCR_PIPELINE
+
+
+def _get_fast_ocr_pipeline():
+    global _OCR_FAST_PIPELINE
+
+    if _OCR_FAST_PIPELINE is not None:
+        return _OCR_FAST_PIPELINE
+
+    with _OCR_FAST_PIPELINE_LOCK:
+        if _OCR_FAST_PIPELINE is None:
+            PaddleOCR = _load_paddleocr_class()
+            _OCR_FAST_PIPELINE = PaddleOCR(**_build_pipeline_kwargs(fast_mode=True))
+
+    return _OCR_FAST_PIPELINE
 
 
 def _get_doc_preprocessor_pipeline():
@@ -339,34 +357,36 @@ def _rotate_and_overwrite_image(
     }
 
 
+def _build_no_rotation_result(image_path: Path) -> dict[str, Any]:
+    width, height = _get_image_size(image_path)
+    return {
+        "rotated": False,
+        "angle": 0,
+        "original_width": width,
+        "original_height": height,
+        "current_width": width,
+        "current_height": height,
+    }
+
+
 def ensure_image_orientation(image_path: Path) -> dict[str, Any]:
     if not image_path.exists():
         raise FileNotFoundError(f"Image file not found: {image_path}")
 
     if not get_ocr_auto_rotate_and_overwrite() or _is_orientation_check_cached(image_path):
-        width, height = _get_image_size(image_path)
-        return {
-            "rotated": False,
-            "angle": 0,
-            "original_width": width,
-            "original_height": height,
-            "current_width": width,
-            "current_height": height,
-        }
+        return _build_no_rotation_result(image_path)
 
     pipeline = _get_doc_preprocessor_pipeline()
-    result = pipeline.predict(str(image_path))
-    if not result:
-        width, height = _get_image_size(image_path)
+    try:
+        result = pipeline.predict(str(image_path))
+    except Exception as exc:  # pragma: no cover
+        print(f"Orientation auto-rotate skipped for {image_path}: {exc}")
         _update_orientation_cache(image_path)
-        return {
-            "rotated": False,
-            "angle": 0,
-            "original_width": width,
-            "original_height": height,
-            "current_width": width,
-            "current_height": height,
-        }
+        return _build_no_rotation_result(image_path)
+
+    if not result:
+        _update_orientation_cache(image_path)
+        return _build_no_rotation_result(image_path)
 
     item = result[0]
     angle = _normalize_orientation_angle(item.get("angle"))
@@ -409,110 +429,335 @@ def _sort_ocr_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [entry for line in lines for entry in line]
 
 
-def _extract_ocr_result(image_path: Path) -> dict[str, Any]:
-    ensure_image_orientation(image_path)
-    pipeline = _get_ocr_pipeline()
+def _normalize_polygon(raw_polygon: Any) -> list[list[int]]:
+    if raw_polygon is None:
+        return []
+
+    polygon: list[list[int]] = []
+    for point in raw_polygon:
+        try:
+            x_value = int(point[0])
+            y_value = int(point[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+
+        polygon.append([x_value, y_value])
+
+    return polygon
+
+
+def _bbox_from_polygon(polygon: list[list[int]]) -> list[int] | None:
+    if not polygon:
+        return None
+
+    x_values = [point[0] for point in polygon]
+    y_values = [point[1] for point in polygon]
+    return [min(x_values), min(y_values), max(x_values), max(y_values)]
+
+
+def _normalize_box(raw_box: Any) -> list[int] | None:
+    if raw_box is None:
+        return None
+
+    box = [int(value) for value in raw_box]
+    if len(box) < 4:
+        return None
+
+    return box[:4]
+
+
+def _sort_polygon_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not entries:
+        return []
+
+    sortable_entries = [
+        {
+            **entry,
+            "box": [int(value) for value in entry["box"][:4]],
+        }
+        for entry in entries
+    ]
+
+    return _sort_ocr_entries(sortable_entries)
+
+
+def _calculate_rotation(polygon: list[list[int]]) -> float:
+    if len(polygon) < 2:
+        return 0.0
+
+    x1, y1 = polygon[0]
+    x2, y2 = polygon[1]
+    return math.degrees(math.atan2(y2 - y1, x2 - x1))
+
+
+def _build_rectangle_polygon(left: int, top: int, right: int, bottom: int) -> list[list[int]]:
+    return [
+        [left, top],
+        [right, top],
+        [right, bottom],
+        [left, bottom],
+    ]
+
+
+def _segment_line_into_words(line_entry: dict[str, Any]) -> list[dict[str, Any]]:
+    line_text = str(line_entry["text"])
+    line_box = [int(value) for value in line_entry["box"][:4]]
+    line_confidence = float(line_entry["confidence"])
+    line_id = str(line_entry["line_id"])
+    line_rotation = float(line_entry.get("rotation", 0.0))
+
+    # Disable naive word splitting. Treat the whole line as a single "word" bounding box.
+    return [
+        {
+            "text": line_text,
+            "confidence": line_confidence,
+            "polygon": line_entry.get("polygon", []),
+            "box": line_box,
+            "line_id": line_id,
+            "rotation": line_rotation,
+        }
+    ]
+
+
+def _extract_ocr_result(image_path: Path, *, auto_rotate: bool = True, fast_mode: bool = False) -> dict[str, Any]:
+    if auto_rotate:
+        ensure_image_orientation(image_path)
+    pipeline = _get_fast_ocr_pipeline() if fast_mode else _get_ocr_pipeline()
     result = pipeline.predict(str(image_path))
     if not result:
         width, height = _get_image_size(image_path)
         return {
             "image_width": width,
             "image_height": height,
-            "texts": [],
-            "scores": [],
-            "boxes": [],
+            "rotation_applied": 0,
+            "lines": [],
+            "words": [],
         }
 
     item = result[0]
-    entries: list[dict[str, Any]] = []
+    raw_line_entries: list[dict[str, Any]] = []
 
-    for text, score, raw_box in zip(
-        item.get("rec_texts", []),
-        item.get("rec_scores", []),
-        item.get("rec_boxes", []),
-        strict=False,
+    for source_index, (text, score, raw_polygon, raw_box) in enumerate(
+        zip(
+            item.get("rec_texts", []),
+            item.get("rec_scores", []),
+            item.get("rec_polys", []),
+            item.get("rec_boxes", []),
+            strict=False,
+        ),
+        start=1,
     ):
-        box = [int(value) for value in raw_box]
-        if len(box) < 4:
-            continue
-
         normalized_text = normalize_text(str(text))
         if not normalized_text:
             continue
 
-        entries.append(
+        polygon = _normalize_polygon(raw_polygon)
+        # Prefer Paddle's native rectangular box output. It is typically more stable for
+        # frontend text-overlay selection than rebuilding a box from the polygon corners.
+        box = _normalize_box(raw_box)
+        if box is None:
+            box = _bbox_from_polygon(polygon)
+        if box is None:
+            continue
+
+        raw_line_entries.append(
             {
+                "source_index": source_index,
                 "text": normalized_text,
-                "score": float(score),
-                "box": box[:4],
+                "confidence": float(score),
+                "polygon": polygon,
+                "box": box,
+                "rotation": _calculate_rotation(polygon),
             }
         )
 
-    sorted_entries = _sort_ocr_entries(entries)
-    texts = [entry["text"] for entry in sorted_entries]
-    scores = [entry["score"] for entry in sorted_entries]
-    boxes = [entry["box"] for entry in sorted_entries]
+    sorted_line_entries = _sort_polygon_entries(raw_line_entries)
+    line_id_by_source_index: dict[int, str] = {}
+    lines: list[dict[str, Any]] = []
+
+    for order, entry in enumerate(sorted_line_entries, start=1):
+        line_id = f"line_{order:03d}"
+        line_id_by_source_index[int(entry["source_index"])] = line_id
+
+        left, top, right, bottom = [int(value) for value in entry["box"][:4]]
+        lines.append(
+            {
+                "id": line_id,
+                "text": str(entry["text"]),
+                "confidence": float(entry["confidence"]),
+                "polygon": entry["polygon"],
+                "bbox": {
+                    "left": left,
+                    "top": top,
+                    "right": right,
+                    "bottom": bottom,
+                    "width": max(0, right - left),
+                    "height": max(0, bottom - top),
+                },
+                "word_ids": [],
+                "order": order,
+                "rotation": float(entry.get("rotation", 0.0)),
+            }
+        )
+
+    line_by_id = {str(line["id"]): line for line in lines}
+    raw_word_entries: list[dict[str, Any]] = []
+    text_words = item.get("text_word", [])
+    text_word_regions = item.get("text_word_region", [])
+
+    text_word_boxes = item.get("text_word_boxes", [])
+
+    for source_index, (line_words, line_regions, line_boxes) in enumerate(
+        zip(text_words, text_word_regions, text_word_boxes, strict=False),
+        start=1,
+    ):
+        line_id = line_id_by_source_index.get(source_index)
+        if not line_id:
+            continue
+
+        line_confidence = float(line_by_id.get(line_id, {}).get("confidence", 0.0))
+        for raw_word, raw_region, raw_word_box in zip(line_words, line_regions, line_boxes, strict=False):
+            normalized_word = normalize_text(str(raw_word))
+            if not normalized_word:
+                continue
+
+            polygon = _normalize_polygon(raw_region)
+            # Prefer Paddle's native word boxes when available.
+            box = _normalize_box(raw_word_box)
+            if box is None:
+                box = _bbox_from_polygon(polygon)
+            if box is None:
+                continue
+
+            raw_word_entries.append(
+                {
+                    "text": normalized_word,
+                    "confidence": line_confidence,
+                    "polygon": polygon,
+                    "box": box,
+                    "line_id": line_id,
+                    "rotation": _calculate_rotation(polygon),
+                }
+            )
+
+    if not raw_word_entries:
+        for source_index, line_words in enumerate(text_words, start=1):
+            line_id = line_id_by_source_index.get(source_index)
+            if not line_id:
+                continue
+
+            line_confidence = float(line_by_id.get(line_id, {}).get("confidence", 0.0))
+            line_boxes = text_word_boxes[source_index - 1] if source_index - 1 < len(text_word_boxes) else []
+            for raw_word, raw_word_box in zip(line_words, line_boxes, strict=False):
+                normalized_word = normalize_text(str(raw_word))
+                if not normalized_word:
+                    continue
+
+                box = _normalize_box(raw_word_box)
+                if box is None:
+                    continue
+
+                raw_word_entries.append(
+                    {
+                        "text": normalized_word,
+                        "confidence": line_confidence,
+                        "polygon": _build_rectangle_polygon(box[0], box[1], box[2], box[3]),
+                        "box": box,
+                        "line_id": line_id,
+                        "rotation": 0.0,
+                    }
+                )
+
+    if not raw_word_entries:
+        for line in lines:
+            bbox = line["bbox"]
+            raw_word_entries.extend(
+                _segment_line_into_words(
+                    {
+                        "text": str(line["text"]),
+                        "confidence": float(line["confidence"]),
+                        "polygon": line["polygon"],
+                        "box": [
+                            int(bbox["left"]),
+                            int(bbox["top"]),
+                            int(bbox["right"]),
+                            int(bbox["bottom"]),
+                        ],
+                        "line_id": str(line["id"]),
+                        "rotation": float(line.get("rotation", 0.0)),
+                    }
+                )
+            )
+
+    sorted_word_entries = _sort_polygon_entries(raw_word_entries)
+    words: list[dict[str, Any]] = []
+    words_by_line_id: dict[str, list[str]] = {}
+
+    for order, entry in enumerate(sorted_word_entries, start=1):
+        left, top, right, bottom = [int(value) for value in entry["box"][:4]]
+        word_id = f"word_{order:04d}"
+        line_id = str(entry["line_id"])
+        words_by_line_id.setdefault(line_id, []).append(word_id)
+
+        words.append(
+            {
+                "id": word_id,
+                "text": str(entry["text"]),
+                "confidence": float(entry["confidence"]),
+                "polygon": entry["polygon"],
+                "bbox": {
+                    "left": left,
+                    "top": top,
+                    "right": right,
+                    "bottom": bottom,
+                    "width": max(0, right - left),
+                    "height": max(0, bottom - top),
+                },
+                "line_id": line_id,
+                "order": order,
+                "rotation": float(entry.get("rotation", 0.0)),
+            }
+        )
+
+    for line in lines:
+        line["word_ids"] = words_by_line_id.get(str(line["id"]), [])
 
     width, height = _get_image_size(image_path)
     return {
         "image_width": width,
         "image_height": height,
-        "texts": texts,
-        "scores": scores,
-        "boxes": boxes,
+        "rotation_applied": 0,
+        "lines": lines,
+        "words": words,
     }
 
 
-def run_ocr(image_path: Path) -> str:
-    extracted = _extract_ocr_result(image_path)
+def run_ocr(image_path: Path, *, auto_rotate: bool = True, fast_mode: bool = False) -> str:
+    extracted = _extract_ocr_result(image_path, auto_rotate=auto_rotate, fast_mode=fast_mode)
     return _ocr_result_to_text(extracted)
 
 
-def run_ocr_with_boxes(image_path: Path) -> dict[str, object]:
-    extracted = _extract_ocr_result(image_path)
+def run_ocr_with_boxes(image_path: Path, *, auto_rotate: bool = True, fast_mode: bool = False) -> dict[str, object]:
+    extracted = _extract_ocr_result(image_path, auto_rotate=auto_rotate, fast_mode=fast_mode)
     return _ocr_result_to_overlay(extracted)
 
 
 def _ocr_result_to_text(extracted: dict[str, Any]) -> str:
-    lines = [text for text in extracted["texts"] if text]
+    lines = [
+        str(line["text"])
+        for line in extracted["lines"]
+        if str(line.get("text", "")).strip()
+    ]
     return normalize_text("\n".join(lines))
 
 
 def _ocr_result_to_overlay(extracted: dict[str, Any]) -> dict[str, object]:
-    words: list[dict[str, object]] = []
-
-    for text, confidence, box in zip(
-        extracted["texts"],
-        extracted["scores"],
-        extracted["boxes"],
-        strict=False,
-    ):
-        if not text:
-            continue
-
-        left, top, right, bottom = box
-        width = max(0, right - left)
-        height = max(0, bottom - top)
-        if width <= 0 or height <= 0:
-            continue
-
-        words.append(
-            {
-                "text": text,
-                "confidence": confidence,
-                "bbox": {
-                    "left": left,
-                    "top": top,
-                    "width": width,
-                    "height": height,
-                },
-            }
-        )
-
     return {
         "image_width": extracted["image_width"],
         "image_height": extracted["image_height"],
-        "words": words,
+        "rotation_applied": extracted.get("rotation_applied", 0),
+        "words": extracted["words"],
+        "lines": extracted["lines"],
     }
 
 

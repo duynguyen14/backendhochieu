@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -18,6 +18,12 @@ from app.services.ocr_service import run_ocr_with_boxes
 
 
 router = APIRouter(tags=["passport-records"])
+
+
+def _to_percent(value: float, total: float) -> float:
+    if total <= 0:
+        return 0.0
+    return round((value / total) * 100, 4)
 
 
 class EditableFieldsPayload(BaseModel):
@@ -117,7 +123,7 @@ def get_passport_record_image(record_id: int):
 
 
 @router.get("/passport-records/{record_id}/ocr-overlay")
-def get_passport_record_ocr_overlay(record_id: int):
+def get_passport_record_ocr_overlay(record_id: int, request: Request):
     record = get_passport_record_detail(record_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Record not found")
@@ -127,10 +133,36 @@ def get_passport_record_ocr_overlay(record_id: int):
         raise HTTPException(status_code=404, detail="Image file not found")
 
     overlay = run_ocr_with_boxes(image_path)
+    image_width = float(overlay.get("image_width") or 0)
+    image_height = float(overlay.get("image_height") or 0)
+
     return {
-        "record_id": record_id,
-        "image_path": str(image_path),
-        **overlay,
+        "status": "success",
+        "data": {
+            "record_id": record_id,
+            "image_path": str(image_path),
+            "image_url": str(request.url_for("get_passport_record_image", record_id=record_id)),
+            "image_width": image_width,
+            "image_height": image_height,
+            "rotation_applied": float(overlay.get("rotation_applied") or 0),
+            "words": [
+                {
+                    "id": str(word.get("id") or ""),
+                    "text": str(word.get("text") or ""),
+                    "confidence": float(word.get("confidence") or 0),
+                    "line_id": str(word.get("line_id") or ""),
+                    "order": int(word.get("order") or 0),
+                    "rotation": float(word.get("rotation") or 0),
+                    "boundingBox": {
+                        "top": _to_percent(float(word["bbox"]["top"]), image_height),
+                        "left": _to_percent(float(word["bbox"]["left"]), image_width),
+                        "width": _to_percent(float(word["bbox"]["width"]), image_width),
+                        "height": _to_percent(float(word["bbox"]["height"]), image_height),
+                    },
+                }
+                for word in overlay.get("words", [])
+            ],
+        },
     }
 
 

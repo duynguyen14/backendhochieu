@@ -146,7 +146,12 @@ def _sync_record_orientation(record_id: int) -> None:
         if not image_path.exists():
             return
 
-        orientation = ensure_image_orientation(image_path)
+        try:
+            orientation = ensure_image_orientation(image_path)
+        except Exception as exc:
+            print(f"Skip orientation sync for record #{record_id}: {exc}")
+            return
+
         if not orientation["rotated"]:
             return
 

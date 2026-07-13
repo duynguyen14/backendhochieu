@@ -2,4 +2,10 @@ fastapi==0.139.0
 pillow==12.3.0
 paddleocr==3.2.0
 pyodbc==5.3.0
+python-multipart==0.0.32
+--extra-index-url https://download.pytorch.org/whl/cu126
+safetensors==0.8.0
+sentencepiece==0.2.1
+torch==2.13.0+cu126
+transformers==5.13.0
 uvicorn==0.50.0
