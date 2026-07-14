@@ -10,13 +10,15 @@ from app.api.routes.passport_records import router as passport_records_router
 from app.config import get_frontend_allowed_origins
 
 
+allowed_origins = get_frontend_allowed_origins()
+
 app = FastAPI(title="Passport OCR Review API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=get_frontend_allowed_origins(),
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$",
-    allow_credentials=True,
+    allow_origins=allowed_origins,
+    allow_origin_regex=None if "*" in allowed_origins else r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$",
+    allow_credentials="*" not in allowed_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )

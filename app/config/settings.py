@@ -282,7 +282,7 @@ def get_ocr_auto_rotate_and_overwrite() -> bool:
 
 
 def get_api_host() -> str:
-    return get_env_value("API_HOST", "127.0.0.1")
+    return get_env_value("API_HOST", "0.0.0.0")
 
 
 def get_api_port() -> int:
@@ -290,5 +290,5 @@ def get_api_port() -> int:
 
 
 def get_frontend_allowed_origins() -> list[str]:
-    raw_value = get_env_value("FRONTEND_ALLOWED_ORIGINS", "http://localhost:4200,http://127.0.0.1:4200")
+    raw_value = get_env_value("FRONTEND_ALLOWED_ORIGINS", "*")
     return [origin.strip() for origin in raw_value.split(",") if origin.strip()]
