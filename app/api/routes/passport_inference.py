@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
+from app.services.ocr_field_matcher import build_ocr_field_matches, serialize_field_matches_for_api
 from app.services.passport_inference_service import (
     get_inference_image_path,
     run_passport_inference,
@@ -16,6 +17,26 @@ def _to_percent(value: float, total: float) -> float:
     if total <= 0:
         return 0.0
     return round((value / total) * 100, 4)
+
+
+def _serialize_overlay_words(words: list[dict[str, object]], image_width: float, image_height: float) -> list[dict[str, object]]:
+    return [
+        {
+            "id": str(word.get("id") or ""),
+            "text": str(word.get("text") or ""),
+            "confidence": float(word.get("confidence") or 0),
+            "line_id": str(word.get("line_id") or ""),
+            "order": int(word.get("order") or 0),
+            "rotation": float(word.get("rotation") or 0),
+            "boundingBox": {
+                "top": _to_percent(float(word["bbox"]["top"]), image_height),
+                "left": _to_percent(float(word["bbox"]["left"]), image_width),
+                "width": _to_percent(float(word["bbox"]["width"]), image_width),
+                "height": _to_percent(float(word["bbox"]["height"]), image_height),
+            },
+        }
+        for word in words
+    ]
 
 
 @router.get("/passport-inference/images/{image_id}", name="get_passport_inference_image")
@@ -56,6 +77,7 @@ async def upload_passport_inference(request: Request, file: UploadFile = File(..
     image_width = float(overlay.get("image_width") or 0)
     image_height = float(overlay.get("image_height") or 0)
     image_url = str(request.url_for("get_passport_inference_image", image_id=result["image_id"]))
+    field_matches = build_ocr_field_matches(result.get("editable_fields"), overlay)
 
     return {
         "status": "success",
@@ -74,23 +96,8 @@ async def upload_passport_inference(request: Request, file: UploadFile = File(..
                 "image_width": image_width,
                 "image_height": image_height,
                 "rotation_applied": float(overlay.get("rotation_applied") or 0),
-                "words": [
-                    {
-                        "id": str(word.get("id") or ""),
-                        "text": str(word.get("text") or ""),
-                        "confidence": float(word.get("confidence") or 0),
-                        "line_id": str(word.get("line_id") or ""),
-                        "order": int(word.get("order") or 0),
-                        "rotation": float(word.get("rotation") or 0),
-                        "boundingBox": {
-                            "top": _to_percent(float(word["bbox"]["top"]), image_height),
-                            "left": _to_percent(float(word["bbox"]["left"]), image_width),
-                            "width": _to_percent(float(word["bbox"]["width"]), image_width),
-                            "height": _to_percent(float(word["bbox"]["height"]), image_height),
-                        },
-                    }
-                    for word in overlay.get("words", [])
-                ],
+                "words": _serialize_overlay_words(overlay.get("words", []), image_width, image_height),
+                "field_matches": serialize_field_matches_for_api(field_matches, image_width, image_height),
             },
         },
     }
