@@ -23,6 +23,7 @@ DEFAULT_LOG_DIR = BASE_DIR / "logs"
 DEFAULT_DONUT_MODEL_DIR = BASE_DIR / "models" / "donut" / "checkpoint-16180"
 DEFAULT_DONUT_PROCESSOR_DIR = BASE_DIR / "models" / "donut" / "processor"
 DEFAULT_INFERENCE_UPLOAD_DIR = BASE_DIR / "uploads" / "passport_inference"
+DEFAULT_PASSPORT_PORTRAIT_OUTPUT_DIR = BASE_DIR / "uploads" / "passport_portraits"
 
 
 def load_env_file(env_file_path: Path = ENV_FILE_PATH) -> None:
@@ -206,6 +207,11 @@ def get_donut_cache_size() -> int:
 
 def get_inference_upload_dir() -> Path:
     configured_path = get_env_value("INFERENCE_UPLOAD_DIR", str(DEFAULT_INFERENCE_UPLOAD_DIR))
+    return Path(configured_path).expanduser().resolve()
+
+
+def get_passport_portrait_output_dir() -> Path:
+    configured_path = get_env_value("PASSPORT_PORTRAIT_OUTPUT_DIR", str(DEFAULT_PASSPORT_PORTRAIT_OUTPUT_DIR))
     return Path(configured_path).expanduser().resolve()
 
 

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
 from app.services.ocr_field_matcher import build_ocr_field_matches, serialize_field_matches_for_api
+from app.services.passport_portrait_service import detect_passport_portrait
 from app.services.passport_inference_service import (
     get_inference_image_path,
     run_passport_inference,
@@ -39,6 +42,27 @@ def _serialize_overlay_words(words: list[dict[str, object]], image_width: float,
     ]
 
 
+def _serialize_bbox(bbox: dict[str, object], image_width: float, image_height: float) -> dict[str, dict[str, float] | float]:
+    left = float(bbox.get("left") or 0)
+    top = float(bbox.get("top") or 0)
+    width = float(bbox.get("width") or 0)
+    height = float(bbox.get("height") or 0)
+    return {
+        "pixels": {
+            "left": left,
+            "top": top,
+            "width": width,
+            "height": height,
+        },
+        "percent": {
+            "left": _to_percent(left, image_width),
+            "top": _to_percent(top, image_height),
+            "width": _to_percent(width, image_width),
+            "height": _to_percent(height, image_height),
+        },
+    }
+
+
 @router.get("/passport-inference/images/{image_id}", name="get_passport_inference_image")
 def get_passport_inference_image(image_id: str):
     image_path = get_inference_image_path(image_id)
@@ -48,6 +72,28 @@ def get_passport_inference_image(image_id: str):
     return FileResponse(
         path=image_path,
         filename=image_path.name,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
+@router.get("/passport-inference/portraits/{image_id}", name="get_passport_inference_portrait_image")
+def get_passport_inference_portrait_image(image_id: str):
+    image_path = get_inference_image_path(image_id)
+    if not image_path.exists():
+        raise HTTPException(status_code=404, detail="Inference image not found")
+
+    portrait = detect_passport_portrait(image_path)
+    portrait_image_path = Path(str(portrait.get("portrait_image_path") or ""))
+    if not portrait_image_path.exists():
+        raise HTTPException(status_code=404, detail="Portrait crop not found")
+
+    return FileResponse(
+        path=portrait_image_path,
+        filename=portrait_image_path.name,
         headers={
             "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
             "Pragma": "no-cache",
@@ -78,6 +124,7 @@ async def upload_passport_inference(request: Request, file: UploadFile = File(..
     image_height = float(overlay.get("image_height") or 0)
     image_url = str(request.url_for("get_passport_inference_image", image_id=result["image_id"]))
     field_matches = build_ocr_field_matches(result.get("editable_fields"), overlay)
+    portrait = detect_passport_portrait(Path(str(result["image_path"])), overlay=overlay)
 
     return {
         "status": "success",
@@ -90,6 +137,17 @@ async def upload_passport_inference(request: Request, file: UploadFile = File(..
             "donut_json": result["donut_json"],
             "task_prompt": result["task_prompt"],
             "performance": result["performance"],
+            "portrait": {
+                "detected": bool(portrait.get("detected")),
+                "face_bbox": _serialize_bbox(portrait.get("face_bbox", {}), image_width, image_height),
+                "portrait_bbox": _serialize_bbox(portrait.get("portrait_bbox", {}), image_width, image_height),
+                "portrait_image_path": str(portrait.get("portrait_image_path") or ""),
+                "portrait_image_url": (
+                    str(request.url_for("get_passport_inference_portrait_image", image_id=result["image_id"]))
+                    if str(portrait.get("portrait_image_path") or "")
+                    else ""
+                ),
+            },
             "overlay": {
                 "image_path": result["image_path"],
                 "image_url": image_url,

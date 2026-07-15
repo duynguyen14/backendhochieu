@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from app.services.ocr_field_matcher import build_ocr_field_matches, serialize_field_matches_for_api
 from app.services.image_path_service import resolve_record_image_path
+from app.services.passport_portrait_service import detect_passport_portrait
 from app.services.passport_review_service import (
     PASSPORT_FIELD_KEYS,
     get_passport_record_detail,
@@ -45,6 +46,27 @@ def _serialize_overlay_words(words: list[dict[str, object]], image_width: float,
         }
         for word in words
     ]
+
+
+def _serialize_bbox(bbox: dict[str, object], image_width: float, image_height: float) -> dict[str, dict[str, float] | float]:
+    left = float(bbox.get("left") or 0)
+    top = float(bbox.get("top") or 0)
+    width = float(bbox.get("width") or 0)
+    height = float(bbox.get("height") or 0)
+    return {
+        "pixels": {
+            "left": left,
+            "top": top,
+            "width": width,
+            "height": height,
+        },
+        "percent": {
+            "left": _to_percent(left, image_width),
+            "top": _to_percent(top, image_height),
+            "width": _to_percent(width, image_width),
+            "height": _to_percent(height, image_height),
+        },
+    }
 
 
 class EditableFieldsPayload(BaseModel):
@@ -171,6 +193,68 @@ def get_passport_record_ocr_overlay(record_id: int, request: Request):
             "field_matches": serialize_field_matches_for_api(field_matches, image_width, image_height),
         },
     }
+
+
+@router.get("/passport-records/{record_id}/portrait")
+def get_passport_record_portrait(record_id: int, request: Request):
+    record = get_passport_record_detail(record_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+
+    image_path = resolve_record_image_path(record["image_path"])
+    if not image_path.exists():
+        raise HTTPException(status_code=404, detail="Image file not found")
+
+    portrait = detect_passport_portrait(image_path)
+    image_width = float(portrait.get("image_width") or 0)
+    image_height = float(portrait.get("image_height") or 0)
+    portrait_image_path = str(portrait.get("portrait_image_path") or "")
+
+    return {
+        "status": "success",
+        "data": {
+            "record_id": record_id,
+            "image_path": str(image_path),
+            "image_url": str(request.url_for("get_passport_record_image", record_id=record_id)),
+            "image_width": image_width,
+            "image_height": image_height,
+            "detected": bool(portrait.get("detected")),
+            "face_bbox": _serialize_bbox(portrait.get("face_bbox", {}), image_width, image_height),
+            "portrait_bbox": _serialize_bbox(portrait.get("portrait_bbox", {}), image_width, image_height),
+            "portrait_image_path": portrait_image_path,
+            "portrait_image_url": (
+                str(request.url_for("get_passport_record_portrait_image", record_id=record_id))
+                if portrait_image_path
+                else ""
+            ),
+        },
+    }
+
+
+@router.get("/passport-records/{record_id}/portrait/image", name="get_passport_record_portrait_image")
+def get_passport_record_portrait_image(record_id: int):
+    record = get_passport_record_detail(record_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+
+    image_path = resolve_record_image_path(record["image_path"])
+    if not image_path.exists():
+        raise HTTPException(status_code=404, detail="Image file not found")
+
+    portrait = detect_passport_portrait(image_path)
+    portrait_image_path = Path(str(portrait.get("portrait_image_path") or ""))
+    if not portrait_image_path.exists():
+        raise HTTPException(status_code=404, detail="Portrait crop not found")
+
+    return FileResponse(
+        path=portrait_image_path,
+        filename=portrait_image_path.name,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @router.post("/passport-records/{record_id}/layoutlm/generate")
