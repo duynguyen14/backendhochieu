@@ -33,11 +33,13 @@ def detect_passport_portrait(
             overlay = run_ocr_with_boxes(source_path, auto_rotate=False, fast_mode=True)
         except Exception:
             overlay = None
-    document_bbox = _infer_document_bbox(image_width, image_height, overlay)
-    face_candidates = _detect_face_candidates(image, document_bbox)
-    best_face = _select_best_face(face_candidates, image, overlay, document_bbox)
+    best_result = _detect_best_portrait_candidate(
+        image,
+        overlay=overlay,
+        use_multi_orientation=overlay is None,
+    )
 
-    if best_face is None:
+    if best_result is None:
         return {
             "detected": False,
             "image_path": str(source_path),
@@ -48,8 +50,8 @@ def detect_passport_portrait(
             "portrait_image_path": "",
         }
 
-    face_bbox = _face_tuple_to_bbox(best_face)
-    portrait_bbox = _expand_face_to_portrait_bbox(face_bbox, image_width, image_height)
+    face_bbox = best_result["face_bbox"]
+    portrait_bbox = best_result["portrait_bbox"]
     portrait_output_path = _save_portrait_crop(image, portrait_bbox, source_path)
 
     return {
@@ -69,6 +71,73 @@ def get_passport_portrait_image_path(source_image_path: Path) -> Path | None:
     if not portrait_image_path:
         return None
     return Path(portrait_image_path)
+
+
+def _detect_best_portrait_candidate(
+    image: Any,
+    *,
+    overlay: dict[str, Any] | None,
+    use_multi_orientation: bool,
+) -> dict[str, Any] | None:
+    original_height, original_width = image.shape[:2]
+    if not use_multi_orientation:
+        orientation_angles = (0,)
+    elif original_width >= original_height:
+        orientation_angles = (0,)
+    else:
+        orientation_angles = (90, 270, 0, 180)
+
+    best_result: dict[str, Any] | None = None
+    best_score = float("-inf")
+
+    for angle in orientation_angles:
+        rotated_image = _rotate_image_by_angle(image, angle)
+        rotated_height, rotated_width = rotated_image.shape[:2]
+        rotated_overlay = overlay if angle == 0 else None
+        document_bbox = _infer_document_bbox(rotated_width, rotated_height, rotated_overlay)
+        face_candidates = _detect_face_candidates(rotated_image, document_bbox)
+        best_face, best_face_score = _select_best_face(
+            face_candidates,
+            rotated_image,
+            rotated_overlay,
+            document_bbox,
+        )
+        if best_face is None:
+            continue
+
+        rotated_face_bbox = _face_tuple_to_bbox(best_face)
+        rotated_portrait_bbox = _expand_face_to_portrait_bbox(
+            rotated_face_bbox,
+            rotated_width,
+            rotated_height,
+        )
+        face_bbox = _map_bbox_to_original_orientation(
+            rotated_face_bbox,
+            angle,
+            original_width,
+            original_height,
+        )
+        portrait_bbox = _map_bbox_to_original_orientation(
+            rotated_portrait_bbox,
+            angle,
+            original_width,
+            original_height,
+        )
+
+        orientation_bonus = 0.18 if angle == 0 and overlay is not None else 0.0
+        total_score = best_face_score + orientation_bonus
+        if total_score <= best_score:
+            continue
+
+        best_score = total_score
+        best_result = {
+            "angle": angle,
+            "score": total_score,
+            "face_bbox": face_bbox,
+            "portrait_bbox": portrait_bbox,
+        }
+
+    return best_result
 
 
 def _get_face_cascade():
@@ -148,9 +217,9 @@ def _select_best_face(
     image: Any,
     overlay: dict[str, Any] | None,
     document_bbox: dict[str, int] | None,
-) -> tuple[int, int, int, int] | None:
+) -> tuple[tuple[int, int, int, int] | None, float]:
     if not face_candidates:
-        return None
+        return None, float("-inf")
 
     filtered_candidates = [
         face for face in face_candidates
@@ -164,12 +233,49 @@ def _select_best_face(
         reverse=True,
     )
     if len(sorted_by_area) == 1:
-        return sorted_by_area[0]
+        sole_face = sorted_by_area[0]
+        return (
+            sole_face,
+            _score_face_candidate(
+                sole_face,
+                image.shape[1],
+                image.shape[0],
+                image,
+                overlay,
+                document_bbox,
+                _infer_preferred_portrait_side(document_bbox, overlay),
+            ),
+        )
 
     largest_area = int(sorted_by_area[0][2]) * int(sorted_by_area[0][3])
     second_area = int(sorted_by_area[1][2]) * int(sorted_by_area[1][3])
-    if largest_area >= int(second_area * 1.05):
-        return sorted_by_area[0]
+    if document_bbox is None:
+        competitive_faces = [
+            face for face in sorted_by_area
+            if (int(face[2]) * int(face[3])) >= int(largest_area * 0.9)
+        ]
+        best_face = max(
+            competitive_faces,
+            key=lambda face: _score_face_candidate(
+                face,
+                image.shape[1],
+                image.shape[0],
+                image,
+                overlay,
+                None,
+                None,
+            ),
+        )
+        best_score = _score_face_candidate(
+            best_face,
+            image.shape[1],
+            image.shape[0],
+            image,
+            overlay,
+            None,
+            None,
+        ) + 0.4
+        return best_face, best_score
 
     image_height, image_width = image.shape[:2]
     best_face: tuple[int, int, int, int] | None = None
@@ -190,7 +296,10 @@ def _select_best_face(
             best_score = score
             best_face = face
 
-    return best_face
+    if largest_area >= int(second_area * 1.12) and sorted_by_area[0] == best_face:
+        best_score += 0.12
+
+    return best_face, best_score
 
 
 def _score_face_candidate(
@@ -465,10 +574,10 @@ def _expand_face_to_portrait_bbox(
     width = int(face_bbox["width"])
     height = int(face_bbox["height"])
 
-    left = max(0, int(round(face_bbox["left"] - (width * 0.55))))
-    top = max(0, int(round(face_bbox["top"] - (height * 0.45))))
-    right = min(image_width, int(round(face_bbox["right"] + (width * 0.55))))
-    bottom = min(image_height, int(round(face_bbox["bottom"] + (height * 0.95))))
+    left = max(0, int(round(face_bbox["left"] - (width * 0.28))))
+    top = max(0, int(round(face_bbox["top"] - (height * 0.22))))
+    right = min(image_width, int(round(face_bbox["right"] + (width * 0.28))))
+    bottom = min(image_height, int(round(face_bbox["bottom"] + (height * 0.58))))
 
     if right <= left:
         right = min(image_width, left + width)
@@ -498,6 +607,66 @@ def _build_bbox(left: int, top: int, right: int, bottom: int) -> dict[str, int]:
         "width": max(0, normalized_right - normalized_left),
         "height": max(0, normalized_bottom - normalized_top),
     }
+
+
+def _rotate_image_by_angle(image: Any, angle: int) -> Any:
+    normalized_angle = angle % 360
+    if normalized_angle == 0:
+        return image
+    if normalized_angle == 90:
+        return cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+    if normalized_angle == 180:
+        return cv2.rotate(image, cv2.ROTATE_180)
+    if normalized_angle == 270:
+        return cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    raise ValueError(f"Unsupported rotation angle: {angle}")
+
+
+def _map_bbox_to_original_orientation(
+    rotated_bbox: dict[str, int],
+    angle: int,
+    original_width: int,
+    original_height: int,
+) -> dict[str, int]:
+    normalized_angle = angle % 360
+    if normalized_angle == 0:
+        return dict(rotated_bbox)
+
+    corners = [
+        (float(rotated_bbox["left"]), float(rotated_bbox["top"])),
+        (float(rotated_bbox["right"]), float(rotated_bbox["top"])),
+        (float(rotated_bbox["right"]), float(rotated_bbox["bottom"])),
+        (float(rotated_bbox["left"]), float(rotated_bbox["bottom"])),
+    ]
+    original_corners = [
+        _map_rotated_point_to_original(point_x, point_y, normalized_angle, original_width, original_height)
+        for point_x, point_y in corners
+    ]
+
+    x_values = [point[0] for point in original_corners]
+    y_values = [point[1] for point in original_corners]
+    return _build_bbox(
+        max(0, int(round(min(x_values)))),
+        max(0, int(round(min(y_values)))),
+        min(original_width, int(round(max(x_values)))),
+        min(original_height, int(round(max(y_values)))),
+    )
+
+
+def _map_rotated_point_to_original(
+    x_value: float,
+    y_value: float,
+    angle: int,
+    original_width: int,
+    original_height: int,
+) -> tuple[float, float]:
+    if angle == 90:
+        return y_value, float(original_height) - x_value
+    if angle == 180:
+        return float(original_width) - x_value, float(original_height) - y_value
+    if angle == 270:
+        return float(original_width) - y_value, x_value
+    return x_value, y_value
 
 
 def _save_portrait_crop(image: Any, portrait_bbox: dict[str, int], source_image_path: Path) -> Path:
