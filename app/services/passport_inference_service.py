@@ -324,6 +324,10 @@ def get_inference_image_path(image_id: str) -> Path:
     return get_inference_upload_dir() / safe_name
 
 
+def store_inference_upload(file_bytes: bytes, file_name: str) -> tuple[str, Path]:
+    return _store_uploaded_image(file_bytes, file_name)
+
+
 def run_passport_inference(file_bytes: bytes, file_name: str) -> dict[str, Any]:
     image_id, image_path = _store_uploaded_image(file_bytes, file_name)
     cached_result = _read_inference_cache(image_id)

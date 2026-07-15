@@ -13,7 +13,12 @@ from app.services.ocr_service import run_ocr_with_boxes
 _FACE_CASCADE: Any | None = None
 
 
-def detect_passport_portrait(image_path: Path, overlay: dict[str, Any] | None = None) -> dict[str, Any]:
+def detect_passport_portrait(
+    image_path: Path,
+    overlay: dict[str, Any] | None = None,
+    *,
+    use_ocr_fallback: bool = True,
+) -> dict[str, Any]:
     source_path = image_path.expanduser().resolve()
     if not source_path.exists():
         raise FileNotFoundError(f"Image file not found: {source_path}")
@@ -23,13 +28,14 @@ def detect_passport_portrait(image_path: Path, overlay: dict[str, Any] | None = 
         raise RuntimeError(f"Could not read image with OpenCV: {source_path}")
 
     image_height, image_width = image.shape[:2]
-    if overlay is None:
+    if overlay is None and use_ocr_fallback:
         try:
             overlay = run_ocr_with_boxes(source_path, auto_rotate=False, fast_mode=True)
         except Exception:
             overlay = None
-    face_candidates = _detect_face_candidates(image)
-    best_face = _select_best_face(face_candidates, image, overlay)
+    document_bbox = _infer_document_bbox(image_width, image_height, overlay)
+    face_candidates = _detect_face_candidates(image, document_bbox)
+    best_face = _select_best_face(face_candidates, image, overlay, document_bbox)
 
     if best_face is None:
         return {
@@ -79,7 +85,10 @@ def _get_face_cascade():
     return _FACE_CASCADE
 
 
-def _detect_face_candidates(image: Any) -> list[tuple[int, int, int, int]]:
+def _detect_face_candidates(
+    image: Any,
+    document_bbox: dict[str, int] | None = None,
+) -> list[tuple[int, int, int, int]]:
     grayscale = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     grayscale = cv2.equalizeHist(grayscale)
     cascade = _get_face_cascade()
@@ -87,18 +96,40 @@ def _detect_face_candidates(image: Any) -> list[tuple[int, int, int, int]]:
     min_face_width = max(36, int(image.shape[1] * 0.08))
     min_face_height = max(36, int(image.shape[0] * 0.12))
 
-    detected_faces: list[tuple[int, int, int, int]] = []
-    for scale_factor, min_neighbors in ((1.08, 5), (1.05, 4), (1.12, 6)):
-        faces = cascade.detectMultiScale(
-            grayscale,
-            scaleFactor=scale_factor,
-            minNeighbors=min_neighbors,
-            minSize=(min_face_width, min_face_height),
-        )
-        detected_faces.extend(
-            (int(x), int(y), int(width), int(height))
-            for (x, y, width, height) in faces
-        )
+    detected_faces: list[tuple[int, int, int, int]] = _detect_faces_in_region(
+        cascade,
+        grayscale,
+        offset_x=0,
+        offset_y=0,
+        min_face_width=min_face_width,
+        min_face_height=min_face_height,
+    )
+
+    if document_bbox is not None:
+        for portrait_region in _build_passport_portrait_regions(document_bbox):
+            region_left = int(portrait_region["left"])
+            region_top = int(portrait_region["top"])
+            region_right = int(portrait_region["right"])
+            region_bottom = int(portrait_region["bottom"])
+            if region_right <= region_left or region_bottom <= region_top:
+                continue
+
+            region_gray = grayscale[region_top:region_bottom, region_left:region_right]
+            if region_gray.size == 0:
+                continue
+
+            region_min_face_width = max(30, int((region_right - region_left) * 0.22))
+            region_min_face_height = max(36, int((region_bottom - region_top) * 0.22))
+            detected_faces.extend(
+                _detect_faces_in_region(
+                    cascade,
+                    region_gray,
+                    offset_x=region_left,
+                    offset_y=region_top,
+                    min_face_width=region_min_face_width,
+                    min_face_height=region_min_face_height,
+                )
+            )
 
     unique_faces: list[tuple[int, int, int, int]] = []
     seen_keys: set[tuple[int, int, int, int]] = set()
@@ -116,12 +147,19 @@ def _select_best_face(
     face_candidates: list[tuple[int, int, int, int]],
     image: Any,
     overlay: dict[str, Any] | None,
+    document_bbox: dict[str, int] | None,
 ) -> tuple[int, int, int, int] | None:
     if not face_candidates:
         return None
 
+    filtered_candidates = [
+        face for face in face_candidates
+        if _is_candidate_inside_passport_region(face, document_bbox)
+    ]
+    candidate_pool = filtered_candidates or face_candidates
+
     sorted_by_area = sorted(
-        face_candidates,
+        candidate_pool,
         key=lambda face: int(face[2]) * int(face[3]),
         reverse=True,
     )
@@ -137,8 +175,17 @@ def _select_best_face(
     best_face: tuple[int, int, int, int] | None = None
     best_score = float("-inf")
 
-    for face in face_candidates:
-        score = _score_face_candidate(face, image_width, image_height, image, overlay)
+    preferred_side = _infer_preferred_portrait_side(document_bbox, overlay)
+    for face in candidate_pool:
+        score = _score_face_candidate(
+            face,
+            image_width,
+            image_height,
+            image,
+            overlay,
+            document_bbox,
+            preferred_side,
+        )
         if score > best_score:
             best_score = score
             best_face = face
@@ -152,6 +199,8 @@ def _score_face_candidate(
     image_height: int,
     image: Any,
     overlay: dict[str, Any] | None,
+    document_bbox: dict[str, int] | None,
+    preferred_side: str | None,
 ) -> float:
     x_value, y_value, width, height = face
     area_ratio = (width * height) / max(1.0, float(image_width * image_height))
@@ -162,6 +211,21 @@ def _score_face_candidate(
     side_bonus = 1.4 if center_x_ratio <= 0.42 or center_x_ratio >= 0.58 else -1.5
     vertical_bonus = 1.0 if 0.18 <= center_y_ratio <= 0.72 else -0.8
     aspect_penalty = abs(1.0 - (width / max(1.0, float(height)))) * 0.6
+
+    document_layout_bonus = 0.0
+    document_bounds_penalty = 0.0
+    preferred_side_bonus = 0.0
+    if document_bbox is not None:
+        document_layout_bonus, document_bounds_penalty = _score_passport_document_layout(
+            face,
+            document_bbox,
+        )
+        if preferred_side:
+            document_center_x_ratio = (
+                (x_value + (width / 2.0)) - document_bbox["left"]
+            ) / max(1.0, float(document_bbox["width"]))
+            candidate_side = "left" if document_center_x_ratio <= 0.5 else "right"
+            preferred_side_bonus = 2.6 if candidate_side == preferred_side else -0.9
 
     face_region = image[y_value : y_value + height, x_value : x_value + width]
     if face_region.size > 0:
@@ -180,23 +244,217 @@ def _score_face_candidate(
         size_score
         + side_bonus
         + vertical_bonus
+        + document_layout_bonus
+        + preferred_side_bonus
         + sharpness_score
         + contrast_score
         - aspect_penalty
+        - document_bounds_penalty
         - text_overlap_penalty
     )
 
 
+def _detect_faces_in_region(
+    cascade: Any,
+    grayscale_region: Any,
+    offset_x: int,
+    offset_y: int,
+    min_face_width: int,
+    min_face_height: int,
+) -> list[tuple[int, int, int, int]]:
+    detected_faces: list[tuple[int, int, int, int]] = []
+    for scale_factor, min_neighbors in ((1.08, 5), (1.05, 4), (1.12, 6)):
+        faces = cascade.detectMultiScale(
+            grayscale_region,
+            scaleFactor=scale_factor,
+            minNeighbors=min_neighbors,
+            minSize=(min_face_width, min_face_height),
+        )
+        detected_faces.extend(
+            (
+                int(x) + offset_x,
+                int(y) + offset_y,
+                int(width),
+                int(height),
+            )
+            for (x, y, width, height) in faces
+        )
+    return detected_faces
+
+
+def _infer_document_bbox(
+    image_width: int,
+    image_height: int,
+    overlay: dict[str, Any] | None,
+) -> dict[str, int] | None:
+    if not overlay:
+        return None
+
+    words = overlay.get("words", [])
+    if not isinstance(words, list) or not words:
+        return None
+
+    left_values: list[float] = []
+    top_values: list[float] = []
+    right_values: list[float] = []
+    bottom_values: list[float] = []
+    for word in words:
+        bbox = word.get("bbox")
+        if not isinstance(bbox, dict):
+            continue
+        left = float(bbox.get("left") or 0)
+        top = float(bbox.get("top") or 0)
+        width = float(bbox.get("width") or 0)
+        height = float(bbox.get("height") or 0)
+        if width <= 0 or height <= 0:
+            continue
+        left_values.append(left)
+        top_values.append(top)
+        right_values.append(left + width)
+        bottom_values.append(top + height)
+
+    if not left_values:
+        return None
+
+    word_left = min(left_values)
+    word_top = min(top_values)
+    word_right = max(right_values)
+    word_bottom = max(bottom_values)
+    word_width = max(1.0, word_right - word_left)
+    word_height = max(1.0, word_bottom - word_top)
+
+    left = max(0, int(round(word_left - (word_width * 0.12))))
+    top = max(0, int(round(word_top - (word_height * 0.1))))
+    right = min(image_width, int(round(word_right + (word_width * 0.08))))
+    bottom = min(image_height, int(round(word_bottom + (word_height * 0.12))))
+
+    if right <= left or bottom <= top:
+        return None
+
+    return {
+        "left": left,
+        "top": top,
+        "right": right,
+        "bottom": bottom,
+        "width": right - left,
+        "height": bottom - top,
+    }
+
+
+def _build_passport_portrait_regions(document_bbox: dict[str, int]) -> list[dict[str, int]]:
+    doc_left = int(document_bbox["left"])
+    doc_top = int(document_bbox["top"])
+    doc_width = int(document_bbox["width"])
+    doc_height = int(document_bbox["height"])
+    doc_right = int(document_bbox["right"])
+    doc_bottom = int(document_bbox["bottom"])
+
+    region_top = doc_top + int(round(doc_height * 0.2))
+    region_bottom = doc_top + int(round(doc_height * 0.82))
+    left_region_right = doc_left + int(round(doc_width * 0.36))
+    right_region_left = doc_right - int(round(doc_width * 0.36))
+
+    return [
+        _build_bbox(
+            doc_left,
+            region_top,
+            left_region_right,
+            min(doc_bottom, region_bottom),
+        ),
+        _build_bbox(
+            max(doc_left, right_region_left),
+            region_top,
+            doc_right,
+            min(doc_bottom, region_bottom),
+        ),
+    ]
+
+
+def _is_candidate_inside_passport_region(
+    face: tuple[int, int, int, int],
+    document_bbox: dict[str, int] | None,
+) -> bool:
+    if document_bbox is None:
+        return True
+
+    x_value, y_value, width, height = face
+    center_x = x_value + (width / 2.0)
+    center_y = y_value + (height / 2.0)
+
+    if not (
+        document_bbox["left"] <= center_x <= document_bbox["right"]
+        and document_bbox["top"] <= center_y <= document_bbox["bottom"]
+    ):
+        return False
+
+    relative_x = (center_x - document_bbox["left"]) / max(1.0, float(document_bbox["width"]))
+    relative_y = (center_y - document_bbox["top"]) / max(1.0, float(document_bbox["height"]))
+    return (
+        0.04 <= relative_x <= 0.96
+        and 0.22 <= relative_y <= 0.9
+        and (relative_x <= 0.42 or relative_x >= 0.58)
+    )
+
+
+def _score_passport_document_layout(
+    face: tuple[int, int, int, int],
+    document_bbox: dict[str, int],
+) -> tuple[float, float]:
+    x_value, y_value, width, height = face
+    center_x = x_value + (width / 2.0)
+    center_y = y_value + (height / 2.0)
+    relative_x = (center_x - document_bbox["left"]) / max(1.0, float(document_bbox["width"]))
+    relative_y = (center_y - document_bbox["top"]) / max(1.0, float(document_bbox["height"]))
+    relative_area = (width * height) / max(1.0, float(document_bbox["width"] * document_bbox["height"]))
+
+    bonus = 0.0
+    penalty = 0.0
+
+    if 0.26 <= relative_y <= 0.78:
+        bonus += 3.4
+    else:
+        penalty += min(abs(relative_y - 0.52) * 10.0, 5.2)
+
+    if relative_x <= 0.34 or relative_x >= 0.66:
+        bonus += 2.4
+    else:
+        penalty += min(abs(relative_x - 0.5) * 6.0, 2.6)
+
+    if 0.012 <= relative_area <= 0.085:
+        bonus += 1.6
+    else:
+        penalty += min(abs(relative_area - 0.038) * 36.0, 3.4)
+
+    return bonus, penalty
+
+
+def _infer_preferred_portrait_side(
+    document_bbox: dict[str, int] | None,
+    overlay: dict[str, Any] | None,
+) -> str | None:
+    if document_bbox is None or not overlay:
+        return None
+
+    portrait_regions = _build_passport_portrait_regions(document_bbox)
+    if len(portrait_regions) != 2:
+        return None
+
+    left_density = _compute_text_overlap_penalty(portrait_regions[0], overlay)
+    right_density = _compute_text_overlap_penalty(portrait_regions[1], overlay)
+    if abs(left_density - right_density) < 0.6:
+        return None
+
+    return "left" if left_density < right_density else "right"
+
+
 def _face_tuple_to_bbox(face: tuple[int, int, int, int]) -> dict[str, int]:
     x_value, y_value, width, height = face
-    return {
-        "left": x_value,
-        "top": y_value,
-        "right": x_value + width,
-        "bottom": y_value + height,
-        "width": width,
-        "height": height,
-    }
+    return _build_bbox(
+        x_value,
+        y_value,
+        x_value + width,
+        y_value + height,
+    )
 
 
 def _expand_face_to_portrait_bbox(
@@ -224,6 +482,21 @@ def _expand_face_to_portrait_bbox(
         "bottom": bottom,
         "width": max(0, right - left),
         "height": max(0, bottom - top),
+    }
+
+
+def _build_bbox(left: int, top: int, right: int, bottom: int) -> dict[str, int]:
+    normalized_left = int(left)
+    normalized_top = int(top)
+    normalized_right = int(right)
+    normalized_bottom = int(bottom)
+    return {
+        "left": normalized_left,
+        "top": normalized_top,
+        "right": normalized_right,
+        "bottom": normalized_bottom,
+        "width": max(0, normalized_right - normalized_left),
+        "height": max(0, normalized_bottom - normalized_top),
     }
 
 

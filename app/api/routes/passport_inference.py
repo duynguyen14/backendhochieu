@@ -10,6 +10,7 @@ from app.services.passport_portrait_service import detect_passport_portrait
 from app.services.passport_inference_service import (
     get_inference_image_path,
     run_passport_inference,
+    store_inference_upload,
 )
 
 
@@ -100,6 +101,49 @@ def get_passport_inference_portrait_image(image_id: str):
             "Expires": "0",
         },
     )
+
+
+@router.post("/passport-portrait/upload")
+async def upload_passport_portrait_only(request: Request, file: UploadFile = File(...)):
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Missing file name")
+
+    try:
+        file_bytes = await file.read()
+        image_id, image_path = store_inference_upload(file_bytes, file.filename)
+        portrait = detect_passport_portrait(image_path, use_ocr_fallback=False)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=f"Passport portrait detection failed: {exc}") from exc
+    finally:
+        await file.close()
+
+    image_width = float(portrait.get("image_width") or 0)
+    image_height = float(portrait.get("image_height") or 0)
+
+    return {
+        "status": "success",
+        "data": {
+            "image_id": image_id,
+            "image_name": Path(file.filename or image_path.name).name,
+            "image_path": str(image_path),
+            "image_url": str(request.url_for("get_passport_inference_image", image_id=image_id)),
+            "detected": bool(portrait.get("detected")),
+            "face_bbox": _serialize_bbox(portrait.get("face_bbox", {}), image_width, image_height),
+            "portrait_bbox": _serialize_bbox(portrait.get("portrait_bbox", {}), image_width, image_height),
+            "portrait_image_path": str(portrait.get("portrait_image_path") or ""),
+            "portrait_image_url": (
+                str(request.url_for("get_passport_inference_portrait_image", image_id=image_id))
+                if str(portrait.get("portrait_image_path") or "")
+                else ""
+            ),
+            "image_width": image_width,
+            "image_height": image_height,
+        },
+    }
 
 
 @router.post("/passport-inference/upload")
