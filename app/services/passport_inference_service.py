@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import re
 import threading
+from io import BytesIO
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -29,6 +32,14 @@ from app.services.passport_review_service import PASSPORT_FIELD_KEYS
 
 
 SUPPORTED_UPLOAD_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+SUPPORTED_IMAGE_DATA_URI_TYPES = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/bmp": ".bmp",
+    "image/tiff": ".tiff",
+    "image/webp": ".webp",
+}
 _DONUT_RUNTIME: dict[str, Any] | None = None
 _DONUT_RUNTIME_LOCK = threading.Lock()
 _INFERENCE_RESULT_CACHE: dict[str, dict[str, Any]] = {}
@@ -147,6 +158,62 @@ def _normalize_file_extension(file_name: str) -> str:
     if suffix in SUPPORTED_UPLOAD_EXTENSIONS:
         return suffix
     return ".jpg"
+
+
+def _detect_extension_from_bytes(file_bytes: bytes) -> str:
+    try:
+        with Image.open(BytesIO(file_bytes)) as image:
+            detected_type = str(image.format or "").strip().upper()
+    except Exception:
+        detected_type = ""
+
+    if detected_type == "JPEG":
+        return ".jpg"
+    if detected_type == "PNG":
+        return ".png"
+    if detected_type == "BMP":
+        return ".bmp"
+    if detected_type == "TIFF":
+        return ".tiff"
+    if detected_type == "WEBP":
+        return ".webp"
+    return ".jpg"
+
+
+def decode_base64_image_payload(base64_payload: str, file_name: str | None = None) -> tuple[bytes, str]:
+    normalized_payload = str(base64_payload or "").strip()
+    if not normalized_payload:
+        raise ValueError("Base64 image payload is empty.")
+
+    resolved_file_name = (file_name or "").strip() or "passport_upload.jpg"
+    payload_to_decode = normalized_payload
+
+    if normalized_payload.startswith("data:"):
+        header, separator, encoded_payload = normalized_payload.partition(",")
+        if not separator:
+            raise ValueError("Invalid base64 data URI.")
+        if ";base64" not in header.lower():
+            raise ValueError("Base64 data URI must include ';base64'.")
+
+        mime_type = header[5:].split(";", 1)[0].strip().lower()
+        payload_to_decode = encoded_payload.strip()
+
+        if Path(resolved_file_name).suffix.lower() not in SUPPORTED_UPLOAD_EXTENSIONS:
+            resolved_extension = SUPPORTED_IMAGE_DATA_URI_TYPES.get(mime_type, ".jpg")
+            resolved_file_name = f"{Path(resolved_file_name).stem}{resolved_extension}"
+
+    try:
+        file_bytes = base64.b64decode(payload_to_decode, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError("Invalid base64 image payload.") from exc
+
+    if not file_bytes:
+        raise ValueError("Decoded image payload is empty.")
+
+    if Path(resolved_file_name).suffix.lower() not in SUPPORTED_UPLOAD_EXTENSIONS:
+        resolved_file_name = f"{Path(resolved_file_name).stem}{_detect_extension_from_bytes(file_bytes)}"
+
+    return file_bytes, Path(resolved_file_name).name
 
 
 def _store_uploaded_image(file_bytes: bytes, file_name: str) -> tuple[str, Path]:

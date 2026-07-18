@@ -4,10 +4,13 @@ from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
+from app.config import get_passport_inference_api_key
 from app.services.ocr_field_matcher import build_ocr_field_matches, serialize_field_matches_for_api
 from app.services.passport_portrait_service import detect_passport_portrait
 from app.services.passport_inference_service import (
+    decode_base64_image_payload,
     get_inference_image_path,
     run_passport_inference,
     store_inference_upload,
@@ -15,6 +18,12 @@ from app.services.passport_inference_service import (
 
 
 router = APIRouter(tags=["passport-inference"])
+
+
+class PassportInferenceUploadPayload(BaseModel):
+    api_key: str = Field(..., min_length=1)
+    base64: str = Field(..., min_length=1)
+    file_name: str = Field(default="passport_upload.jpg", min_length=1)
 
 
 def _to_percent(value: float, total: float) -> float:
@@ -147,28 +156,28 @@ async def upload_passport_portrait_only(request: Request, file: UploadFile = Fil
 
 
 @router.post("/passport-inference/upload")
-async def upload_passport_inference(request: Request, file: UploadFile = File(...)):
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="Missing file name")
+async def upload_passport_inference(request: Request, payload: PassportInferenceUploadPayload):
+    configured_api_key = get_passport_inference_api_key()
+    if not configured_api_key:
+        raise HTTPException(status_code=500, detail="PASSPORT_INFERENCE_API_KEY is not configured")
+    if payload.api_key != configured_api_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
 
     try:
-        file_bytes = await file.read()
-        result = run_passport_inference(file_bytes, file.filename)
+        file_bytes, resolved_file_name = decode_base64_image_payload(payload.base64, payload.file_name)
+        result = run_passport_inference(file_bytes, resolved_file_name)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
         raise HTTPException(status_code=500, detail=f"Passport inference failed: {exc}") from exc
-    finally:
-        await file.close()
 
     overlay = result["overlay"]
     image_width = float(overlay.get("image_width") or 0)
     image_height = float(overlay.get("image_height") or 0)
     image_url = str(request.url_for("get_passport_inference_image", image_id=result["image_id"]))
     field_matches = build_ocr_field_matches(result.get("editable_fields"), overlay)
-    portrait = detect_passport_portrait(Path(str(result["image_path"])), overlay=overlay)
 
     return {
         "status": "success",
@@ -181,17 +190,6 @@ async def upload_passport_inference(request: Request, file: UploadFile = File(..
             "donut_json": result["donut_json"],
             "task_prompt": result["task_prompt"],
             "performance": result["performance"],
-            "portrait": {
-                "detected": bool(portrait.get("detected")),
-                "face_bbox": _serialize_bbox(portrait.get("face_bbox", {}), image_width, image_height),
-                "portrait_bbox": _serialize_bbox(portrait.get("portrait_bbox", {}), image_width, image_height),
-                "portrait_image_path": str(portrait.get("portrait_image_path") or ""),
-                "portrait_image_url": (
-                    str(request.url_for("get_passport_inference_portrait_image", image_id=result["image_id"]))
-                    if str(portrait.get("portrait_image_path") or "")
-                    else ""
-                ),
-            },
             "overlay": {
                 "image_path": result["image_path"],
                 "image_url": image_url,

@@ -219,6 +219,10 @@ def get_inference_skip_ocr_auto_rotate() -> bool:
     return get_bool_env("INFERENCE_SKIP_OCR_AUTO_ROTATE", False)
 
 
+def get_passport_inference_api_key() -> str:
+    return get_env_value("PASSPORT_INFERENCE_API_KEY", "")
+
+
 def get_donut_inference_image_width() -> int:
     return max(256, int(get_env_value("DONUT_INFERENCE_IMAGE_WIDTH", "2560")))
 
