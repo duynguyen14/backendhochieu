@@ -220,7 +220,7 @@ def get_inference_skip_ocr_auto_rotate() -> bool:
 
 
 def get_passport_inference_api_key() -> str:
-    return get_env_value("PASSPORT_INFERENCE_API_KEY", "")
+    return get_env_value("PASSPORT_INFERENCE_API_KEY") or get_env_value("API_KEY", "")
 
 
 def get_donut_inference_image_width() -> int:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
@@ -24,6 +25,49 @@ class PassportInferenceUploadPayload(BaseModel):
     api_key: str = Field(..., min_length=1)
     base64: str = Field(..., min_length=1)
     file_name: str = Field(default="passport_upload.jpg", min_length=1)
+
+
+def _guess_content_type(file_path: Path) -> str:
+    suffix = file_path.suffix.lower()
+    if suffix in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if suffix == ".png":
+        return "image/png"
+    if suffix == ".bmp":
+        return "image/bmp"
+    if suffix in {".tif", ".tiff"}:
+        return "image/tiff"
+    if suffix == ".webp":
+        return "image/webp"
+    return "application/octet-stream"
+
+
+def _serialize_face_image(portrait: dict[str, object]) -> dict[str, object]:
+    portrait_image_path = Path(str(portrait.get("portrait_image_path") or "")).expanduser()
+    if not portrait_image_path.exists():
+        return {
+            "detected": False,
+            "file_name": "",
+            "content_type": "",
+            "base64": "",
+        }
+
+    file_bytes = portrait_image_path.read_bytes()
+    return {
+        "detected": True,
+        "file_name": portrait_image_path.name,
+        "content_type": _guess_content_type(portrait_image_path),
+        "base64": base64.b64encode(file_bytes).decode("ascii"),
+    }
+
+
+def _build_empty_face_image() -> dict[str, object]:
+    return {
+        "detected": False,
+        "file_name": "",
+        "content_type": "",
+        "base64": "",
+    }
 
 
 def _to_percent(value: float, total: float) -> float:
@@ -178,6 +222,11 @@ async def upload_passport_inference(request: Request, payload: PassportInference
     image_height = float(overlay.get("image_height") or 0)
     image_url = str(request.url_for("get_passport_inference_image", image_id=result["image_id"]))
     field_matches = build_ocr_field_matches(result.get("editable_fields"), overlay)
+    try:
+        portrait = detect_passport_portrait(Path(str(result["image_path"])), overlay=overlay)
+        face_image = _serialize_face_image(portrait)
+    except Exception:
+        face_image = _build_empty_face_image()
 
     return {
         "status": "success",
@@ -190,6 +239,7 @@ async def upload_passport_inference(request: Request, payload: PassportInference
             "donut_json": result["donut_json"],
             "task_prompt": result["task_prompt"],
             "performance": result["performance"],
+            "face_image": face_image,
             "overlay": {
                 "image_path": result["image_path"],
                 "image_url": image_url,
