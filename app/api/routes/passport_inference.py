@@ -101,6 +101,7 @@ def _append_inference_request_log(
     detail: str,
     image_id: str = "",
     cache_hit: bool | None = None,
+    response_data: dict[str, object] | None = None,
 ) -> None:
     current_time = datetime.now()
     log_file_path = _get_inference_request_log_file_path(current_time)
@@ -118,6 +119,8 @@ def _append_inference_request_log(
     }
     if cache_hit is not None:
         request_summary["cache_hit"] = cache_hit
+    if response_data is not None:
+        request_summary["response_data"] = response_data
 
     with _INFERENCE_REQUEST_LOG_LOCK:
         with log_file_path.open("a", encoding="utf-8") as log_file:
@@ -144,6 +147,19 @@ def _run_donut_stage_limited(image_path: Path) -> dict[str, object]:
 def _build_face_image_payload(image_path: Path, overlay: dict[str, object]) -> dict[str, object]:
     portrait = detect_passport_portrait(image_path, overlay=overlay)
     return _serialize_face_image(portrait)
+
+
+def _build_loggable_response_data(data: dict[str, object]) -> dict[str, object]:
+    loggable_data = dict(data)
+
+    raw_face_image = loggable_data.get("face_image")
+    if isinstance(raw_face_image, dict):
+        face_image = dict(raw_face_image)
+        base64_value = str(face_image.pop("base64", "") or "")
+        face_image["base64_length"] = len(base64_value)
+        loggable_data["face_image"] = face_image
+
+    return loggable_data
 
 
 def _to_percent(value: float, total: float) -> float:
@@ -360,6 +376,27 @@ async def upload_passport_inference(request: Request, payload: PassportInference
     except Exception:
         face_image = _build_empty_face_image()
 
+    response_data = {
+        "image_id": result["image_id"],
+        "image_name": result["image_name"],
+        "image_url": image_url,
+        "editable_fields": result["editable_fields"],
+        "donut_raw_text": result["donut_raw_text"],
+        "donut_json": result["donut_json"],
+        "task_prompt": result["task_prompt"],
+        "performance": result["performance"],
+        "face_image": face_image,
+        "overlay": {
+            "image_path": result["image_path"],
+            "image_url": image_url,
+            "image_width": image_width,
+            "image_height": image_height,
+            "rotation_applied": float(overlay.get("rotation_applied") or 0),
+            "words": _serialize_overlay_words(overlay.get("words", []), image_width, image_height),
+            "field_matches": serialize_field_matches_for_api(field_matches, image_width, image_height),
+        },
+    }
+
     _safe_append_inference_request_log(
         request=request,
         payload=payload,
@@ -367,28 +404,10 @@ async def upload_passport_inference(request: Request, payload: PassportInference
         detail="Passport inference completed",
         image_id=str(result.get("image_id") or ""),
         cache_hit=bool(result.get("performance", {}).get("cache_hit")),
+        response_data=_build_loggable_response_data(response_data),
     )
 
     return {
         "status": "success",
-        "data": {
-            "image_id": result["image_id"],
-            "image_name": result["image_name"],
-            "image_url": image_url,
-            "editable_fields": result["editable_fields"],
-            "donut_raw_text": result["donut_raw_text"],
-            "donut_json": result["donut_json"],
-            "task_prompt": result["task_prompt"],
-            "performance": result["performance"],
-            "face_image": face_image,
-            "overlay": {
-                "image_path": result["image_path"],
-                "image_url": image_url,
-                "image_width": image_width,
-                "image_height": image_height,
-                "rotation_applied": float(overlay.get("rotation_applied") or 0),
-                "words": _serialize_overlay_words(overlay.get("words", []), image_width, image_height),
-                "field_matches": serialize_field_matches_for_api(field_matches, image_width, image_height),
-            },
-        },
+        "data": response_data,
     }
