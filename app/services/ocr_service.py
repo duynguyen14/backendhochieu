@@ -264,6 +264,15 @@ def _get_doc_preprocessor_pipeline():
     return _DOC_PREPROCESSOR_PIPELINE
 
 
+def preload_ocr_runtime(*, fast_mode: bool = True, include_orientation: bool = True) -> None:
+    if include_orientation:
+        _get_doc_preprocessor_pipeline()
+    if fast_mode:
+        _get_fast_ocr_pipeline()
+    else:
+        _get_ocr_pipeline()
+
+
 def _get_image_size(image_path: Path) -> tuple[int, int]:
     with Image.open(image_path) as image:
         corrected_image = ImageOps.exif_transpose(image)

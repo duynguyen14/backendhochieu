@@ -205,6 +205,14 @@ def get_donut_cache_size() -> int:
     return max(1, int(get_env_value("DONUT_CACHE_SIZE", "32")))
 
 
+def get_inference_ocr_concurrency() -> int:
+    return max(1, int(get_env_value("INFERENCE_OCR_CONCURRENCY", "2")))
+
+
+def get_inference_donut_concurrency() -> int:
+    return max(1, int(get_env_value("INFERENCE_DONUT_CONCURRENCY", "1")))
+
+
 def get_inference_upload_dir() -> Path:
     configured_path = get_env_value("INFERENCE_UPLOAD_DIR", str(DEFAULT_INFERENCE_UPLOAD_DIR))
     return Path(configured_path).expanduser().resolve()

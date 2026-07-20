@@ -154,6 +154,10 @@ def _get_face_cascade():
     return _FACE_CASCADE
 
 
+def preload_passport_portrait_runtime() -> None:
+    _get_face_cascade()
+
+
 def _detect_face_candidates(
     image: Any,
     document_bbox: dict[str, int] | None = None,

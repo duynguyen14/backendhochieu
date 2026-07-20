@@ -391,30 +391,41 @@ def get_inference_image_path(image_id: str) -> Path:
     return get_inference_upload_dir() / safe_name
 
 
-def store_inference_upload(file_bytes: bytes, file_name: str) -> tuple[str, Path]:
-    return _store_uploaded_image(file_bytes, file_name)
+def preload_passport_inference_runtime() -> dict[str, Any]:
+    return _get_donut_runtime()
 
 
-def run_passport_inference(file_bytes: bytes, file_name: str) -> dict[str, Any]:
+def prepare_passport_inference(file_bytes: bytes, file_name: str) -> tuple[str, Path, dict[str, Any] | None]:
     image_id, image_path = _store_uploaded_image(file_bytes, file_name)
     cached_result = _read_inference_cache(image_id)
     if cached_result is not None and image_path.exists():
-        return cached_result
+        return image_id, image_path, cached_result
+    return image_id, image_path, None
 
-    total_started = perf_counter()
-    ocr_started = perf_counter()
-    overlay = run_ocr_with_boxes(
+
+def run_passport_ocr_stage(image_path: Path) -> dict[str, Any]:
+    return run_ocr_with_boxes(
         image_path,
         auto_rotate=not get_inference_skip_ocr_auto_rotate(),
         fast_mode=True,
     )
-    ocr_duration_ms = round((perf_counter() - ocr_started) * 1000, 2)
 
-    donut_started = perf_counter()
-    donut_result = _run_donut_inference(image_path)
-    donut_duration_ms = round((perf_counter() - donut_started) * 1000, 2)
-    total_duration_ms = round((perf_counter() - total_started) * 1000, 2)
 
+def run_passport_donut_stage(image_path: Path) -> dict[str, Any]:
+    return _run_donut_inference(image_path)
+
+
+def build_passport_inference_result(
+    *,
+    image_id: str,
+    image_path: Path,
+    file_name: str,
+    overlay: dict[str, Any],
+    donut_result: dict[str, Any],
+    ocr_duration_ms: float,
+    donut_duration_ms: float,
+    total_duration_ms: float,
+) -> dict[str, Any]:
     runtime = _get_donut_runtime()
     result = {
         "image_id": image_id,
@@ -438,3 +449,34 @@ def run_passport_inference(file_bytes: bytes, file_name: str) -> dict[str, Any]:
     }
     _write_inference_cache(image_id, result)
     return result
+
+
+def store_inference_upload(file_bytes: bytes, file_name: str) -> tuple[str, Path]:
+    return _store_uploaded_image(file_bytes, file_name)
+
+
+def run_passport_inference(file_bytes: bytes, file_name: str) -> dict[str, Any]:
+    image_id, image_path, cached_result = prepare_passport_inference(file_bytes, file_name)
+    if cached_result is not None:
+        return cached_result
+
+    total_started = perf_counter()
+    ocr_started = perf_counter()
+    overlay = run_passport_ocr_stage(image_path)
+    ocr_duration_ms = round((perf_counter() - ocr_started) * 1000, 2)
+
+    donut_started = perf_counter()
+    donut_result = run_passport_donut_stage(image_path)
+    donut_duration_ms = round((perf_counter() - donut_started) * 1000, 2)
+    total_duration_ms = round((perf_counter() - total_started) * 1000, 2)
+
+    return build_passport_inference_result(
+        image_id=image_id,
+        image_path=image_path,
+        file_name=file_name,
+        overlay=overlay,
+        donut_result=donut_result,
+        ocr_duration_ms=ocr_duration_ms,
+        donut_duration_ms=donut_duration_ms,
+        total_duration_ms=total_duration_ms,
+    )

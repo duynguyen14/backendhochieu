@@ -1,24 +1,41 @@
 from __future__ import annotations
 
+import asyncio
 import base64
+import json
+from datetime import datetime
 from pathlib import Path
+from threading import Lock
+from time import perf_counter
+import threading
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from app.config import get_passport_inference_api_key
+from app.config import (
+    get_inference_donut_concurrency,
+    get_inference_ocr_concurrency,
+    get_log_dir,
+    get_passport_inference_api_key,
+)
 from app.services.ocr_field_matcher import build_ocr_field_matches, serialize_field_matches_for_api
 from app.services.passport_portrait_service import detect_passport_portrait
 from app.services.passport_inference_service import (
+    build_passport_inference_result,
     decode_base64_image_payload,
     get_inference_image_path,
-    run_passport_inference,
+    prepare_passport_inference,
+    run_passport_donut_stage,
+    run_passport_ocr_stage,
     store_inference_upload,
 )
 
 
 router = APIRouter(tags=["passport-inference"])
+_INFERENCE_REQUEST_LOG_LOCK = Lock()
+_INFERENCE_OCR_STAGE_LIMIT = threading.Semaphore(get_inference_ocr_concurrency())
+_INFERENCE_DONUT_STAGE_LIMIT = threading.Semaphore(get_inference_donut_concurrency())
 
 
 class PassportInferenceUploadPayload(BaseModel):
@@ -68,6 +85,65 @@ def _build_empty_face_image() -> dict[str, object]:
         "content_type": "",
         "base64": "",
     }
+
+
+def _get_inference_request_log_file_path(current_time: datetime) -> Path:
+    date_folder = get_log_dir() / current_time.strftime("%Y-%m-%d")
+    date_folder.mkdir(parents=True, exist_ok=True)
+    return date_folder / "passport_inference_requests.txt"
+
+
+def _append_inference_request_log(
+    *,
+    request: Request,
+    payload: PassportInferenceUploadPayload,
+    status: str,
+    detail: str,
+    image_id: str = "",
+    cache_hit: bool | None = None,
+) -> None:
+    current_time = datetime.now()
+    log_file_path = _get_inference_request_log_file_path(current_time)
+    client_ip = request.client.host if request.client else ""
+    request_summary = {
+        "timestamp": current_time.strftime("%Y-%m-%d %H:%M:%S"),
+        "client_ip": client_ip,
+        "path": str(request.url.path),
+        "method": request.method,
+        "status": status,
+        "detail": detail,
+        "file_name": payload.file_name,
+        "base64_length": len(payload.base64 or ""),
+        "image_id": image_id,
+    }
+    if cache_hit is not None:
+        request_summary["cache_hit"] = cache_hit
+
+    with _INFERENCE_REQUEST_LOG_LOCK:
+        with log_file_path.open("a", encoding="utf-8") as log_file:
+            log_file.write(json.dumps(request_summary, ensure_ascii=False) + "\n")
+
+
+def _safe_append_inference_request_log(**kwargs: object) -> None:
+    try:
+        _append_inference_request_log(**kwargs)
+    except Exception:
+        return
+
+
+def _run_ocr_stage_limited(image_path: Path) -> dict[str, object]:
+    with _INFERENCE_OCR_STAGE_LIMIT:
+        return run_passport_ocr_stage(image_path)
+
+
+def _run_donut_stage_limited(image_path: Path) -> dict[str, object]:
+    with _INFERENCE_DONUT_STAGE_LIMIT:
+        return run_passport_donut_stage(image_path)
+
+
+def _build_face_image_payload(image_path: Path, overlay: dict[str, object]) -> dict[str, object]:
+    portrait = detect_passport_portrait(image_path, overlay=overlay)
+    return _serialize_face_image(portrait)
 
 
 def _to_percent(value: float, total: float) -> float:
@@ -203,18 +279,71 @@ async def upload_passport_portrait_only(request: Request, file: UploadFile = Fil
 async def upload_passport_inference(request: Request, payload: PassportInferenceUploadPayload):
     configured_api_key = get_passport_inference_api_key()
     if not configured_api_key:
+        _safe_append_inference_request_log(
+            request=request,
+            payload=payload,
+            status="error",
+            detail="PASSPORT_INFERENCE_API_KEY is not configured",
+        )
         raise HTTPException(status_code=500, detail="PASSPORT_INFERENCE_API_KEY is not configured")
     if payload.api_key != configured_api_key:
+        _safe_append_inference_request_log(
+            request=request,
+            payload=payload,
+            status="error",
+            detail="Invalid API key",
+        )
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     try:
+        total_started = perf_counter()
         file_bytes, resolved_file_name = decode_base64_image_payload(payload.base64, payload.file_name)
-        result = run_passport_inference(file_bytes, resolved_file_name)
+        image_id, image_path, cached_result = prepare_passport_inference(file_bytes, resolved_file_name)
+        if cached_result is not None:
+            result = cached_result
+        else:
+            ocr_started = perf_counter()
+            overlay = await asyncio.to_thread(_run_ocr_stage_limited, image_path)
+            ocr_duration_ms = round((perf_counter() - ocr_started) * 1000, 2)
+
+            donut_started = perf_counter()
+            donut_result = await asyncio.to_thread(_run_donut_stage_limited, image_path)
+            donut_duration_ms = round((perf_counter() - donut_started) * 1000, 2)
+            total_duration_ms = round((perf_counter() - total_started) * 1000, 2)
+
+            result = build_passport_inference_result(
+                image_id=image_id,
+                image_path=image_path,
+                file_name=resolved_file_name,
+                overlay=overlay,
+                donut_result=donut_result,
+                ocr_duration_ms=ocr_duration_ms,
+                donut_duration_ms=donut_duration_ms,
+                total_duration_ms=total_duration_ms,
+            )
     except ValueError as exc:
+        _safe_append_inference_request_log(
+            request=request,
+            payload=payload,
+            status="error",
+            detail=str(exc),
+        )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
+        _safe_append_inference_request_log(
+            request=request,
+            payload=payload,
+            status="error",
+            detail=str(exc),
+        )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
+        _safe_append_inference_request_log(
+            request=request,
+            payload=payload,
+            status="error",
+            detail=f"Passport inference failed: {exc}",
+        )
         raise HTTPException(status_code=500, detail=f"Passport inference failed: {exc}") from exc
 
     overlay = result["overlay"]
@@ -223,10 +352,22 @@ async def upload_passport_inference(request: Request, payload: PassportInference
     image_url = str(request.url_for("get_passport_inference_image", image_id=result["image_id"]))
     field_matches = build_ocr_field_matches(result.get("editable_fields"), overlay)
     try:
-        portrait = detect_passport_portrait(Path(str(result["image_path"])), overlay=overlay)
-        face_image = _serialize_face_image(portrait)
+        face_image = await asyncio.to_thread(
+            _build_face_image_payload,
+            Path(str(result["image_path"])),
+            overlay,
+        )
     except Exception:
         face_image = _build_empty_face_image()
+
+    _safe_append_inference_request_log(
+        request=request,
+        payload=payload,
+        status="success",
+        detail="Passport inference completed",
+        image_id=str(result.get("image_id") or ""),
+        cache_hit=bool(result.get("performance", {}).get("cache_hit")),
+    )
 
     return {
         "status": "success",
