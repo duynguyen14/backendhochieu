@@ -580,7 +580,7 @@ def _expand_face_to_portrait_bbox(
 
     horizontal_padding = width * 0.18
     top_padding = height * 0.40
-    bottom_padding = height * 0.48
+    bottom_padding = height * 0.42
 
     left = max(0, int(round(face_bbox["left"] - horizontal_padding)))
     top = max(0, int(round(face_bbox["top"] - top_padding)))
