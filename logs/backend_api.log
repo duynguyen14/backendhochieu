@@ -224,3 +224,8 @@ ConnectionResetError: [WinError 10054] An existing connection was forcibly close
 2026-07-15 16:22:34,557 | INFO | Host: 0.0.0.0
 2026-07-15 16:22:34,557 | INFO | Port: 8000
 2026-07-15 16:22:34,557 | INFO | Log file: D:\DocHochieu\Backend\logs\backend_api.log
+2026-07-21 11:08:54,409 | INFO | Starting Passport OCR backend
+2026-07-21 11:08:54,411 | INFO | Host: 0.0.0.0
+2026-07-21 11:08:54,411 | INFO | Port: 8000
+2026-07-21 11:08:54,411 | INFO | Log file: D:\DocHochieu\Backend\logs\backend_api.log
+2026-07-21 11:09:37,658 | INFO | Preloading OCR, Donut, and portrait detection runtimes

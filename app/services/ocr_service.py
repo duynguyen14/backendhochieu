@@ -561,11 +561,11 @@ def _extract_ocr_result(image_path: Path, *, auto_rotate: bool = True, fast_mode
             continue
 
         polygon = _normalize_polygon(raw_polygon)
-        # Prefer Paddle's native rectangular box output. It is typically more stable for
-        # frontend text-overlay selection than rebuilding a box from the polygon corners.
-        box = _normalize_box(raw_box)
+        # Use the polygon-derived bbox first for overlay rendering so selection boxes
+        # stay aligned with the actual rendered text footprint.
+        box = _bbox_from_polygon(polygon)
         if box is None:
-            box = _bbox_from_polygon(polygon)
+            box = _normalize_box(raw_box)
         if box is None:
             continue
 
@@ -631,10 +631,11 @@ def _extract_ocr_result(image_path: Path, *, auto_rotate: bool = True, fast_mode
                 continue
 
             polygon = _normalize_polygon(raw_region)
-            # Prefer Paddle's native word boxes when available.
-            box = _normalize_box(raw_word_box)
+            # For copy-overlay words, the polygon-derived bbox is usually a better fit
+            # than Paddle's compact rectangular word box.
+            box = _bbox_from_polygon(polygon)
             if box is None:
-                box = _bbox_from_polygon(polygon)
+                box = _normalize_box(raw_word_box)
             if box is None:
                 continue
 
