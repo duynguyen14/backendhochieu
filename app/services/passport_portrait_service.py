@@ -578,10 +578,15 @@ def _expand_face_to_portrait_bbox(
     width = int(face_bbox["width"])
     height = int(face_bbox["height"])
 
-    left = max(0, int(round(face_bbox["left"] - (width * 0.28))))
-    top = max(0, int(round(face_bbox["top"] - (height * 0.22))))
-    right = min(image_width, int(round(face_bbox["right"] + (width * 0.28))))
-    bottom = min(image_height, int(round(face_bbox["bottom"] + (height * 0.58))))
+    # Keep more forehead and shoulder area so the cropped portrait does not feel too tight.
+    horizontal_padding = width * 0.42
+    top_padding = height * 0.34
+    bottom_padding = height * 0.88
+
+    left = max(0, int(round(face_bbox["left"] - horizontal_padding)))
+    top = max(0, int(round(face_bbox["top"] - top_padding)))
+    right = min(image_width, int(round(face_bbox["right"] + horizontal_padding)))
+    bottom = min(image_height, int(round(face_bbox["bottom"] + bottom_padding)))
 
     if right <= left:
         right = min(image_width, left + width)
