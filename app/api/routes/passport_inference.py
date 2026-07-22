@@ -149,8 +149,29 @@ def _build_face_image_payload(image_path: Path, overlay: dict[str, object]) -> d
     return _serialize_face_image(portrait)
 
 
+def _build_source_image_payload(image_path: Path) -> dict[str, object]:
+    resolved_path = image_path.expanduser().resolve()
+    if not resolved_path.exists():
+        return {
+            "file_name": "",
+            "content_type": "",
+            "base64": "",
+        }
+
+    file_bytes = resolved_path.read_bytes()
+    return {
+        "file_name": resolved_path.name,
+        "content_type": _guess_content_type(resolved_path),
+        "base64": base64.b64encode(file_bytes).decode("ascii"),
+    }
+
+
 def _build_loggable_response_data(data: dict[str, object]) -> dict[str, object]:
     loggable_data = dict(data)
+
+    source_image_base64 = str(loggable_data.pop("image_base64", "") or "")
+    if source_image_base64:
+        loggable_data["image_base64_length"] = len(source_image_base64)
 
     raw_face_image = loggable_data.get("face_image")
     if isinstance(raw_face_image, dict):
@@ -158,6 +179,14 @@ def _build_loggable_response_data(data: dict[str, object]) -> dict[str, object]:
         base64_value = str(face_image.pop("base64", "") or "")
         face_image["base64_length"] = len(base64_value)
         loggable_data["face_image"] = face_image
+
+    raw_overlay = loggable_data.get("overlay")
+    if isinstance(raw_overlay, dict):
+        overlay = dict(raw_overlay)
+        overlay_base64 = str(overlay.pop("image_base64", "") or "")
+        if overlay_base64:
+            overlay["image_base64_length"] = len(overlay_base64)
+        loggable_data["overlay"] = overlay
 
     return loggable_data
 
@@ -366,6 +395,7 @@ async def upload_passport_inference(request: Request, payload: PassportInference
     image_width = float(overlay.get("image_width") or 0)
     image_height = float(overlay.get("image_height") or 0)
     image_url = str(request.url_for("get_passport_inference_image", image_id=result["image_id"]))
+    source_image = _build_source_image_payload(Path(str(result["image_path"])))
     field_matches = build_ocr_field_matches(result.get("editable_fields"), overlay)
     try:
         face_image = await asyncio.to_thread(
@@ -380,6 +410,8 @@ async def upload_passport_inference(request: Request, payload: PassportInference
         "image_id": result["image_id"],
         "image_name": result["image_name"],
         "image_url": image_url,
+        "image_content_type": source_image["content_type"],
+        "image_base64": source_image["base64"],
         "editable_fields": result["editable_fields"],
         "donut_raw_text": result["donut_raw_text"],
         "donut_json": result["donut_json"],
@@ -389,6 +421,8 @@ async def upload_passport_inference(request: Request, payload: PassportInference
         "overlay": {
             "image_path": result["image_path"],
             "image_url": image_url,
+            "image_content_type": source_image["content_type"],
+            "image_base64": source_image["base64"],
             "image_width": image_width,
             "image_height": image_height,
             "rotation_applied": float(overlay.get("rotation_applied") or 0),
