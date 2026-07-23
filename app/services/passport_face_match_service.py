@@ -45,14 +45,25 @@ _SFACE_LANDMARK_TEMPLATE = (
 )
 
 
-def _load_runtime_dependencies() -> tuple[Any, Any, Any]:
+def _load_cv_numpy() -> tuple[Any, Any]:
     try:
         import cv2
         import numpy as np
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError(
+            f"Face match base dependencies are missing: {exc}. Install OpenCV and NumPy."
+        ) from exc
+
+    return cv2, np
+
+
+def _load_runtime_dependencies() -> tuple[Any, Any, Any]:
+    cv2, np = _load_cv_numpy()
+    try:
         import onnxruntime as ort
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError(
-            "Face match dependencies are missing. Install OpenCV, NumPy, and onnxruntime-gpu."
+            f"ONNX Runtime is not available: {exc}. Face match will use OpenCV fallback."
         ) from exc
 
     return cv2, np, ort
@@ -91,7 +102,9 @@ def _select_ort_providers(ort: Any, *, prefer_cuda: bool) -> tuple[list[Any], st
     if prefer_cuda and "CUDAExecutionProvider" in available_providers:
         return ["CUDAExecutionProvider", "CPUExecutionProvider"], "cuda", "CUDAExecutionProvider"
 
-    return ["CPUExecutionProvider"], "cpu", "CPUExecutionProvider"
+    raise RuntimeError(
+        f"CUDAExecutionProvider is not available in ONNX Runtime providers: {available_providers}"
+    )
 
 
 def _resolve_model_input_size(session: Any, *, fallback: tuple[int, int]) -> tuple[int, int]:
@@ -105,7 +118,66 @@ def _resolve_model_input_size(session: Any, *, fallback: tuple[int, int]) -> tup
     return width, height
 
 
-def _create_runtime(*, prefer_cuda: bool) -> dict[str, Any]:
+def _resolve_cv_backend_target(cv2: Any, *, prefer_cuda: bool) -> tuple[int, int, str, str]:
+    if prefer_cuda and hasattr(cv2, "cuda") and cv2.cuda.getCudaEnabledDeviceCount() > 0:
+        return (
+            cv2.dnn.DNN_BACKEND_CUDA,
+            cv2.dnn.DNN_TARGET_CUDA_FP16,
+            "cuda",
+            "opencv_cuda_fp16",
+        )
+
+    return (
+        cv2.dnn.DNN_BACKEND_OPENCV,
+        cv2.dnn.DNN_TARGET_CPU,
+        "cpu",
+        "opencv_cpu",
+    )
+
+
+def _create_opencv_runtime(*, prefer_cuda: bool, fallback_reason: str) -> dict[str, Any]:
+    cv2, np = _load_cv_numpy()
+    detector_model_path = _ensure_model_file(get_face_match_detector_model_path(), YUNET_MODEL_URL)
+    recognizer_model_path = _ensure_model_file(get_face_match_recognizer_model_path(), SFACE_MODEL_URL)
+    backend_id, target_id, device, target = _resolve_cv_backend_target(cv2, prefer_cuda=prefer_cuda)
+
+    detector = cv2.FaceDetectorYN_create(
+        str(detector_model_path),
+        "",
+        (640, 640),
+        _YUNET_SCORE_THRESHOLD,
+        _YUNET_NMS_THRESHOLD,
+        _YUNET_TOP_K,
+        backend_id,
+        target_id,
+    )
+    recognizer = cv2.FaceRecognizerSF_create(
+        str(recognizer_model_path),
+        "",
+        backend_id,
+        target_id,
+    )
+
+    return {
+        "runtime": "opencv-fallback",
+        "cv2": cv2,
+        "np": np,
+        "detector": detector,
+        "recognizer": recognizer,
+        "device": device,
+        "target": target,
+        "available_providers": [],
+        "active_detector_providers": [],
+        "active_recognizer_providers": [],
+        "fallback_reason": fallback_reason,
+        "detector_model_path": str(detector_model_path),
+        "recognizer_model_path": str(recognizer_model_path),
+        "input_width": 640,
+        "input_height": 640,
+    }
+
+
+def _create_onnx_runtime(*, prefer_cuda: bool) -> dict[str, Any]:
     cv2, np, ort = _load_runtime_dependencies()
     detector_model_path = _ensure_model_file(get_face_match_detector_model_path(), YUNET_MODEL_URL)
     recognizer_model_path = _ensure_model_file(get_face_match_recognizer_model_path(), SFACE_MODEL_URL)
@@ -122,6 +194,16 @@ def _create_runtime(*, prefer_cuda: bool) -> dict[str, Any]:
         sess_options=session_options,
         providers=providers,
     )
+    detector_providers = detector_session.get_providers()
+    recognizer_providers = recognizer_session.get_providers()
+    if device == "cuda" and (
+        "CUDAExecutionProvider" not in detector_providers
+        or "CUDAExecutionProvider" not in recognizer_providers
+    ):
+        raise RuntimeError(
+            "CUDAExecutionProvider was requested but ONNX Runtime did not activate it. "
+            f"detector_providers={detector_providers}, recognizer_providers={recognizer_providers}"
+        )
 
     detector_input_name = detector_session.get_inputs()[0].name
     recognizer_input_name = recognizer_session.get_inputs()[0].name
@@ -133,6 +215,7 @@ def _create_runtime(*, prefer_cuda: bool) -> dict[str, Any]:
     )
 
     return {
+        "runtime": "onnxruntime",
         "cv2": cv2,
         "np": np,
         "ort": ort,
@@ -145,13 +228,23 @@ def _create_runtime(*, prefer_cuda: bool) -> dict[str, Any]:
         "device": device,
         "target": target,
         "available_providers": ort.get_available_providers(),
-        "active_detector_providers": detector_session.get_providers(),
-        "active_recognizer_providers": recognizer_session.get_providers(),
+        "active_detector_providers": detector_providers,
+        "active_recognizer_providers": recognizer_providers,
         "detector_model_path": str(detector_model_path),
         "recognizer_model_path": str(recognizer_model_path),
         "input_width": detector_input_width,
         "input_height": detector_input_height,
     }
+
+
+def _create_runtime(*, prefer_cuda: bool) -> dict[str, Any]:
+    try:
+        return _create_onnx_runtime(prefer_cuda=prefer_cuda)
+    except Exception as exc:
+        return _create_opencv_runtime(
+            prefer_cuda=prefer_cuda,
+            fallback_reason=str(exc),
+        )
 
 
 def _get_runtime() -> dict[str, Any]:
@@ -177,12 +270,13 @@ def preload_passport_face_match_runtime() -> dict[str, Any]:
 def get_passport_face_match_runtime_info() -> dict[str, Any]:
     runtime = _get_runtime()
     return {
-        "runtime": "onnxruntime",
+        "runtime": runtime["runtime"],
         "device": runtime["device"],
         "target": runtime["target"],
         "available_providers": runtime["available_providers"],
         "active_detector_providers": runtime["active_detector_providers"],
         "active_recognizer_providers": runtime["active_recognizer_providers"],
+        "fallback_reason": runtime.get("fallback_reason", ""),
         "detector_model_path": runtime["detector_model_path"],
         "recognizer_model_path": runtime["recognizer_model_path"],
         "input_width": runtime["input_width"],
@@ -216,6 +310,15 @@ def _prepare_yunet_input(image: Any) -> tuple[Any, float, float]:
 
 def _run_yunet(image: Any) -> list[Any]:
     runtime = _get_runtime()
+    if runtime["runtime"] == "opencv-fallback":
+        detector = runtime["detector"]
+        image_height, image_width = image.shape[:2]
+        detector.setInputSize((int(image_width), int(image_height)))
+        _, faces = detector.detect(image)
+        if faces is None:
+            return []
+        return [face for face in faces]
+
     blob, scale_x, scale_y = _prepare_yunet_input(image)
     outputs = runtime["detector_session"].run(
         runtime["detector_output_names"],
@@ -389,12 +492,17 @@ def _extract_face_embedding(image: Any, face_row: Any) -> tuple[Any, dict[str, A
     runtime = _get_runtime()
 
     started = perf_counter()
-    aligned_face = _align_face(image, face_row)
-    blob = _prepare_sface_input(aligned_face)
-    feature = runtime["recognizer_session"].run(
-        [runtime["recognizer_output_name"]],
-        {runtime["recognizer_input_name"]: blob},
-    )[0]
+    if runtime["runtime"] == "opencv-fallback":
+        recognizer = runtime["recognizer"]
+        aligned_face = recognizer.alignCrop(image, face_row.reshape(1, -1))
+        feature = recognizer.feature(aligned_face)
+    else:
+        aligned_face = _align_face(image, face_row)
+        blob = _prepare_sface_input(aligned_face)
+        feature = runtime["recognizer_session"].run(
+            [runtime["recognizer_output_name"]],
+            {runtime["recognizer_input_name"]: blob},
+        )[0]
     duration_ms = round((perf_counter() - started) * 1000, 2)
     content_type, aligned_base64 = _encode_image_to_base64(aligned_face)
 
@@ -414,6 +522,11 @@ def _feature_norm(feature: Any) -> float:
 
 def _match_features(left_feature: Any, right_feature: Any) -> float:
     runtime = _get_runtime()
+    if runtime["runtime"] == "opencv-fallback":
+        cv2 = runtime["cv2"]
+        recognizer = runtime["recognizer"]
+        return float(recognizer.match(left_feature, right_feature, cv2.FaceRecognizerSF_FR_COSINE))
+
     np = runtime["np"]
     left = left_feature.reshape(-1).astype(np.float32)
     right = right_feature.reshape(-1).astype(np.float32)
@@ -485,12 +598,13 @@ def verify_passport_face_match(
         "engine": {
             "detector": "YuNet",
             "recognizer": "SFace",
-            "runtime": "onnxruntime",
+            "runtime": runtime["runtime"],
             "device": runtime["device"],
             "target": runtime["target"],
             "available_providers": runtime["available_providers"],
             "active_detector_providers": runtime["active_detector_providers"],
             "active_recognizer_providers": runtime["active_recognizer_providers"],
+            "fallback_reason": runtime.get("fallback_reason", ""),
             "detector_model_path": runtime["detector_model_path"],
             "recognizer_model_path": runtime["recognizer_model_path"],
             "input_width": runtime["input_width"],
