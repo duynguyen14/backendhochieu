@@ -343,8 +343,8 @@ def get_face_match_prefer_cuda() -> bool:
 
 
 def get_face_match_input_width() -> int:
-    return max(160, int(get_env_value("FACE_MATCH_INPUT_WIDTH", "320")))
+    return max(160, int(get_env_value("FACE_MATCH_INPUT_WIDTH", "640")))
 
 
 def get_face_match_input_height() -> int:
-    return max(160, int(get_env_value("FACE_MATCH_INPUT_HEIGHT", "320")))
+    return max(160, int(get_env_value("FACE_MATCH_INPUT_HEIGHT", "640")))
