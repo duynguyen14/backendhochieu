@@ -20,7 +20,7 @@ from app.config import (
     get_passport_inference_api_key,
 )
 from app.services.ocr_field_matcher import build_ocr_field_matches, serialize_field_matches_for_api
-from app.services.passport_face_match_service import verify_passport_face_match
+from app.services.passport_face_match_service import get_passport_face_match_runtime_info, verify_passport_face_match
 from app.services.passport_portrait_service import detect_passport_portrait
 from app.services.passport_inference_service import (
     build_passport_inference_result,
@@ -550,4 +550,12 @@ async def verify_passport_face(request: Request, payload: PassportFaceVerifyPayl
     return {
         "status": "success",
         "data": result,
+    }
+
+
+@router.get("/passport-face-match/runtime")
+def get_passport_face_match_runtime():
+    return {
+        "status": "success",
+        "data": get_passport_face_match_runtime_info(),
     }

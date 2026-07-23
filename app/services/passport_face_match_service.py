@@ -174,6 +174,22 @@ def preload_passport_face_match_runtime() -> dict[str, Any]:
     return _get_runtime()
 
 
+def get_passport_face_match_runtime_info() -> dict[str, Any]:
+    runtime = _get_runtime()
+    return {
+        "runtime": "onnxruntime",
+        "device": runtime["device"],
+        "target": runtime["target"],
+        "available_providers": runtime["available_providers"],
+        "active_detector_providers": runtime["active_detector_providers"],
+        "active_recognizer_providers": runtime["active_recognizer_providers"],
+        "detector_model_path": runtime["detector_model_path"],
+        "recognizer_model_path": runtime["recognizer_model_path"],
+        "input_width": runtime["input_width"],
+        "input_height": runtime["input_height"],
+    }
+
+
 def _decode_image(file_bytes: bytes) -> Any:
     runtime = _get_runtime()
     cv2 = runtime["cv2"]
