@@ -8,6 +8,7 @@ import cv2
 
 from app.config import get_passport_portrait_output_dir
 from app.services.ocr_service import run_ocr_with_boxes
+from app.services.passport_face_match_service import detect_primary_face_bbox
 
 
 _FACE_CASCADE: Any | None = None
@@ -156,12 +157,23 @@ def _get_face_cascade():
 
 def preload_passport_portrait_runtime() -> None:
     _get_face_cascade()
+    try:
+        # Warm the YuNet detector used before the Haar fallback.
+        import numpy as np
+
+        detect_primary_face_bbox(np.zeros((640, 640, 3), dtype=np.uint8))
+    except Exception:
+        pass
 
 
 def _detect_face_candidates(
     image: Any,
     document_bbox: dict[str, int] | None = None,
 ) -> list[tuple[int, int, int, int]]:
+    yunet_faces = _detect_yunet_face_candidates(image)
+    if yunet_faces:
+        return yunet_faces
+
     grayscale = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     grayscale = cv2.equalizeHist(grayscale)
     cascade = _get_face_cascade()
@@ -214,6 +226,36 @@ def _detect_face_candidates(
         unique_faces.append(face)
 
     return unique_faces
+
+
+def _detect_yunet_face_candidates(image: Any) -> list[tuple[int, int, int, int]]:
+    try:
+        primary_face = detect_primary_face_bbox(image)
+    except Exception:
+        return []
+
+    if not primary_face:
+        return []
+
+    bbox = primary_face.get("bbox")
+    if not isinstance(bbox, dict):
+        return []
+
+    confidence = float(primary_face.get("confidence") or 0)
+    if confidence < 0.55:
+        return []
+
+    image_height, image_width = image.shape[:2]
+    left = max(0, int(round(float(bbox.get("left") or 0))))
+    top = max(0, int(round(float(bbox.get("top") or 0))))
+    width = max(1, int(round(float(bbox.get("width") or 0))))
+    height = max(1, int(round(float(bbox.get("height") or 0))))
+    right = min(image_width, left + width)
+    bottom = min(image_height, top + height)
+    if right <= left or bottom <= top:
+        return []
+
+    return [(left, top, right - left, bottom - top)]
 
 
 def _select_best_face(

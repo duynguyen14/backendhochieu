@@ -455,6 +455,20 @@ def _face_confidence(face_row: Any) -> float:
     return round(float(face_row[14]), 6)
 
 
+def detect_primary_face_bbox(image: Any) -> dict[str, Any] | None:
+    face_row, detect_meta = _detect_primary_face(image)
+    if face_row is None:
+        return None
+
+    return {
+        "bbox": _face_bbox(face_row),
+        "confidence": _face_confidence(face_row),
+        "face_count": detect_meta["count"],
+        "duration_ms": detect_meta["duration_ms"],
+        "runtime": _get_runtime()["runtime"],
+    }
+
+
 def _encode_image_to_base64(image: Any) -> tuple[str, str]:
     runtime = _get_runtime()
     cv2 = runtime["cv2"]
