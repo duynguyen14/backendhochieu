@@ -24,6 +24,7 @@ DEFAULT_DONUT_MODEL_DIR = BASE_DIR / "models" / "donut" / "checkpoint-16180"
 DEFAULT_DONUT_PROCESSOR_DIR = BASE_DIR / "models" / "donut" / "processor"
 DEFAULT_INFERENCE_UPLOAD_DIR = BASE_DIR / "uploads" / "passport_inference"
 DEFAULT_PASSPORT_PORTRAIT_OUTPUT_DIR = BASE_DIR / "uploads" / "passport_portraits"
+DEFAULT_FACE_MATCH_MODEL_DIR = BASE_DIR / "models" / "opencv_face"
 
 
 def load_env_file(env_file_path: Path = ENV_FILE_PATH) -> None:
@@ -310,3 +311,40 @@ def get_api_port() -> int:
 def get_frontend_allowed_origins() -> list[str]:
     raw_value = get_env_value("FRONTEND_ALLOWED_ORIGINS", "*")
     return [origin.strip() for origin in raw_value.split(",") if origin.strip()]
+
+
+def get_face_match_model_dir() -> Path:
+    configured_path = get_env_value("FACE_MATCH_MODEL_DIR", str(DEFAULT_FACE_MATCH_MODEL_DIR))
+    return Path(configured_path).expanduser().resolve()
+
+
+def get_face_match_detector_model_path() -> Path:
+    default_path = get_face_match_model_dir() / "face_detection_yunet_2023mar.onnx"
+    configured_path = get_env_value("FACE_MATCH_DETECTOR_MODEL_PATH", str(default_path))
+    return Path(configured_path).expanduser().resolve()
+
+
+def get_face_match_recognizer_model_path() -> Path:
+    default_path = get_face_match_model_dir() / "face_recognition_sface_2021dec.onnx"
+    configured_path = get_env_value("FACE_MATCH_RECOGNIZER_MODEL_PATH", str(default_path))
+    return Path(configured_path).expanduser().resolve()
+
+
+def get_face_match_match_threshold() -> float:
+    return float(get_env_value("FACE_MATCH_MATCH_THRESHOLD", "0.363"))
+
+
+def get_face_match_review_threshold() -> float:
+    return float(get_env_value("FACE_MATCH_REVIEW_THRESHOLD", "0.300"))
+
+
+def get_face_match_prefer_cuda() -> bool:
+    return get_bool_env("FACE_MATCH_PREFER_CUDA", True)
+
+
+def get_face_match_input_width() -> int:
+    return max(160, int(get_env_value("FACE_MATCH_INPUT_WIDTH", "320")))
+
+
+def get_face_match_input_height() -> int:
+    return max(160, int(get_env_value("FACE_MATCH_INPUT_HEIGHT", "320")))

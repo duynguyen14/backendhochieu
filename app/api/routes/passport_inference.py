@@ -20,6 +20,7 @@ from app.config import (
     get_passport_inference_api_key,
 )
 from app.services.ocr_field_matcher import build_ocr_field_matches, serialize_field_matches_for_api
+from app.services.passport_face_match_service import verify_passport_face_match
 from app.services.passport_portrait_service import detect_passport_portrait
 from app.services.passport_inference_service import (
     build_passport_inference_result,
@@ -42,6 +43,14 @@ class PassportInferenceUploadPayload(BaseModel):
     api_key: str = Field(..., min_length=1)
     base64: str = Field(..., min_length=1)
     file_name: str = Field(default="passport_upload.jpg", min_length=1)
+
+
+class PassportFaceVerifyPayload(BaseModel):
+    api_key: str = Field(..., min_length=1)
+    passport_face_base64: str = Field(..., min_length=1)
+    passport_face_file_name: str = Field(default="passport_face.jpg", min_length=1)
+    uploaded_face_base64: str = Field(..., min_length=1)
+    uploaded_face_file_name: str = Field(default="uploaded_face.jpg", min_length=1)
 
 
 def _guess_content_type(file_path: Path) -> str:
@@ -96,7 +105,7 @@ def _get_inference_request_log_file_path(current_time: datetime) -> Path:
 def _append_inference_request_log(
     *,
     request: Request,
-    payload: PassportInferenceUploadPayload,
+    payload: BaseModel,
     status: str,
     detail: str,
     image_id: str = "",
@@ -106,6 +115,19 @@ def _append_inference_request_log(
     current_time = datetime.now()
     log_file_path = _get_inference_request_log_file_path(current_time)
     client_ip = request.client.host if request.client else ""
+    payload_data = payload.model_dump() if isinstance(payload, BaseModel) else {}
+    file_name = str(
+        payload_data.get("file_name")
+        or payload_data.get("passport_face_file_name")
+        or payload_data.get("uploaded_face_file_name")
+        or ""
+    )
+    raw_base64_value = str(
+        payload_data.get("base64")
+        or payload_data.get("passport_face_base64")
+        or payload_data.get("uploaded_face_base64")
+        or ""
+    )
     request_summary = {
         "timestamp": current_time.strftime("%Y-%m-%d %H:%M:%S"),
         "client_ip": client_ip,
@@ -113,8 +135,8 @@ def _append_inference_request_log(
         "method": request.method,
         "status": status,
         "detail": detail,
-        "file_name": payload.file_name,
-        "base64_length": len(payload.base64 or ""),
+        "file_name": file_name,
+        "base64_length": len(raw_base64_value),
         "image_id": image_id,
     }
     if cache_hit is not None:
@@ -189,6 +211,43 @@ def _build_loggable_response_data(data: dict[str, object]) -> dict[str, object]:
         loggable_data["overlay"] = overlay
 
     return loggable_data
+
+
+def _build_loggable_face_match_response(data: dict[str, object]) -> dict[str, object]:
+    loggable_data = dict(data)
+
+    for field_name in ("passport_face", "uploaded_face"):
+        raw_face = loggable_data.get(field_name)
+        if not isinstance(raw_face, dict):
+            continue
+
+        face_data = dict(raw_face)
+        for base64_field_name in ("base64", "aligned_face_base64"):
+            base64_value = str(face_data.pop(base64_field_name, "") or "")
+            if base64_value:
+                face_data[f"{base64_field_name}_length"] = len(base64_value)
+        loggable_data[field_name] = face_data
+
+    return loggable_data
+
+
+def _validate_inference_api_key(*, configured_api_key: str, provided_api_key: str, request: Request, payload: BaseModel) -> None:
+    if not configured_api_key:
+        _safe_append_inference_request_log(
+            request=request,
+            payload=payload,
+            status="error",
+            detail="PASSPORT_INFERENCE_API_KEY is not configured",
+        )
+        raise HTTPException(status_code=500, detail="PASSPORT_INFERENCE_API_KEY is not configured")
+    if provided_api_key != configured_api_key:
+        _safe_append_inference_request_log(
+            request=request,
+            payload=payload,
+            status="error",
+            detail="Invalid API key",
+        )
+        raise HTTPException(status_code=401, detail="Invalid API key")
 
 
 def _to_percent(value: float, total: float) -> float:
@@ -323,22 +382,12 @@ async def upload_passport_portrait_only(request: Request, file: UploadFile = Fil
 @router.post("/passport-inference/upload")
 async def upload_passport_inference(request: Request, payload: PassportInferenceUploadPayload):
     configured_api_key = get_passport_inference_api_key()
-    if not configured_api_key:
-        _safe_append_inference_request_log(
-            request=request,
-            payload=payload,
-            status="error",
-            detail="PASSPORT_INFERENCE_API_KEY is not configured",
-        )
-        raise HTTPException(status_code=500, detail="PASSPORT_INFERENCE_API_KEY is not configured")
-    if payload.api_key != configured_api_key:
-        _safe_append_inference_request_log(
-            request=request,
-            payload=payload,
-            status="error",
-            detail="Invalid API key",
-        )
-        raise HTTPException(status_code=401, detail="Invalid API key")
+    _validate_inference_api_key(
+        configured_api_key=configured_api_key,
+        provided_api_key=payload.api_key,
+        request=request,
+        payload=payload,
+    )
 
     try:
         total_started = perf_counter()
@@ -444,4 +493,61 @@ async def upload_passport_inference(request: Request, payload: PassportInference
     return {
         "status": "success",
         "data": response_data,
+    }
+
+
+@router.post("/passport-face-match/verify")
+async def verify_passport_face(request: Request, payload: PassportFaceVerifyPayload):
+    configured_api_key = get_passport_inference_api_key()
+    _validate_inference_api_key(
+        configured_api_key=configured_api_key,
+        provided_api_key=payload.api_key,
+        request=request,
+        payload=payload,
+    )
+
+    try:
+        result = await asyncio.to_thread(
+            verify_passport_face_match,
+            passport_face_base64=payload.passport_face_base64,
+            passport_face_file_name=payload.passport_face_file_name,
+            uploaded_face_base64=payload.uploaded_face_base64,
+            uploaded_face_file_name=payload.uploaded_face_file_name,
+        )
+    except ValueError as exc:
+        _safe_append_inference_request_log(
+            request=request,
+            payload=payload,
+            status="error",
+            detail=str(exc),
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        _safe_append_inference_request_log(
+            request=request,
+            payload=payload,
+            status="error",
+            detail=str(exc),
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        _safe_append_inference_request_log(
+            request=request,
+            payload=payload,
+            status="error",
+            detail=f"Passport face match failed: {exc}",
+        )
+        raise HTTPException(status_code=500, detail=f"Passport face match failed: {exc}") from exc
+
+    _safe_append_inference_request_log(
+        request=request,
+        payload=payload,
+        status="success",
+        detail="Passport face match completed",
+        response_data=_build_loggable_face_match_response(result),
+    )
+
+    return {
+        "status": "success",
+        "data": result,
     }

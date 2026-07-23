@@ -13,6 +13,7 @@ _NON_ALNUM_PATTERN = re.compile(r"[^0-9A-Z]+")
 _MULTISPACE_PATTERN = re.compile(r"\s+")
 _DIGIT_PATTERN = re.compile(r"\d+")
 _DATE_COMPACT_PATTERN = re.compile(r"^\d{8}$")
+_ALPHA_MONTH_DATE_PATTERN = re.compile(r"\b(\d{1,2})\s+([A-Z]{3,9})\s+(\d{2,4})\b")
 
 _FIELD_MATCH_THRESHOLDS: dict[str, float] = {
     "passport_type": 0.99,
@@ -29,6 +30,47 @@ _FIELD_MATCH_THRESHOLDS: dict[str, float] = {
     "date_of_expiry": 0.95,
     "issuing_authority": 0.72,
     "personal_number": 0.9,
+}
+
+_FIELD_ANCHOR_LABELS: dict[str, tuple[str, ...]] = {
+    "date_of_birth": (
+        "DATE OF BIRTH",
+        "BIRTH",
+        "DATE BIRTH",
+    ),
+    "passport_type": (
+        "TYPE",
+        "DOC TYPE",
+        "DOCUMENT TYPE",
+        "PASSPORT TYPE",
+    ),
+}
+
+_MONTH_NAME_MAP: dict[str, int] = {
+    "JAN": 1,
+    "JANUARY": 1,
+    "FEB": 2,
+    "FEBRUARY": 2,
+    "MAR": 3,
+    "MARCH": 3,
+    "APR": 4,
+    "APRIL": 4,
+    "MAY": 5,
+    "JUN": 6,
+    "JUNE": 6,
+    "JUL": 7,
+    "JULY": 7,
+    "AUG": 8,
+    "AUGUST": 8,
+    "SEP": 9,
+    "SEPT": 9,
+    "SEPTEMBER": 9,
+    "OCT": 10,
+    "OCTOBER": 10,
+    "NOV": 11,
+    "NOVEMBER": 11,
+    "DEC": 12,
+    "DECEMBER": 12,
 }
 
 
@@ -51,7 +93,7 @@ def build_ocr_field_matches(
     candidates = _build_candidates(overlay)
     matches: dict[str, dict[str, Any]] = {}
     for field_key, expected_value in normalized_fields.items():
-        matches[field_key] = _find_best_match(field_key, expected_value, candidates)
+        matches[field_key] = _find_best_match(field_key, expected_value, candidates, overlay)
 
     return matches
 
@@ -243,6 +285,7 @@ def _find_best_match(
     field_key: str,
     expected_value: str,
     candidates: list[dict[str, Any]],
+    overlay: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     cleaned_expected_value = str(expected_value or "").strip()
     if not cleaned_expected_value:
@@ -252,15 +295,22 @@ def _find_best_match(
     best_candidate: dict[str, Any] | None = None
     best_score = 0.0
     best_match_type = "none"
+    best_ranking_score = 0.0
 
-    for candidate in candidates:
+    all_candidates = list(candidates)
+    if overlay is not None:
+        all_candidates.extend(_build_anchor_candidates(field_key, overlay))
+
+    for candidate in all_candidates:
         score, match_type = _score_candidate(field_key, cleaned_expected_value, candidate)
         if score <= 0:
             continue
-        if score > best_score:
+        ranking_score = score + _anchor_candidate_bonus(field_key, candidate)
+        if ranking_score > best_ranking_score:
             best_candidate = candidate
             best_score = score
             best_match_type = match_type
+            best_ranking_score = ranking_score
 
     if best_candidate is None:
         return _build_empty_match(field_key, cleaned_expected_value)
@@ -277,6 +327,214 @@ def _find_best_match(
         "line_ids": list(best_candidate.get("line_ids") or []),
         "bbox": dict(best_candidate.get("bbox") or {}),
     }
+
+
+def _build_anchor_candidates(field_key: str, overlay: dict[str, Any]) -> list[dict[str, Any]]:
+    label_variants = _FIELD_ANCHOR_LABELS.get(field_key)
+    if not label_variants:
+        return []
+
+    lines = overlay.get("lines", [])
+    words = overlay.get("words", [])
+    if not isinstance(lines, list) or not isinstance(words, list):
+        return []
+
+    anchors = _find_anchor_entries(lines, label_variants)
+    if not anchors and field_key == "passport_type":
+        anchors = _find_anchor_entries(words, label_variants)
+    if not anchors:
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    seen_keys: set[tuple[str, tuple[str, ...], str]] = set()
+
+    for anchor in anchors:
+        anchor_bbox = anchor.get("bbox")
+        if not isinstance(anchor_bbox, dict):
+            continue
+
+        right_words = _find_anchor_right_words(words, anchor_bbox)
+        _append_anchor_word_candidates(candidates, seen_keys, right_words, source="anchor_right")
+
+        below_words = _find_anchor_below_words(words, anchor_bbox)
+        _append_anchor_word_candidates(candidates, seen_keys, below_words, source="anchor_below")
+
+        if field_key == "passport_type":
+            left_words = _find_anchor_left_words(words, anchor_bbox)
+            _append_anchor_word_candidates(candidates, seen_keys, left_words, source="anchor_left")
+
+    return candidates
+
+
+def _find_anchor_entries(entries: list[dict[str, Any]], label_variants: tuple[str, ...]) -> list[dict[str, Any]]:
+    anchors: list[dict[str, Any]] = []
+    normalized_variants = [_normalize_text(label) for label in label_variants]
+
+    for entry in entries:
+        normalized_text = _normalize_text(str(entry.get("text") or ""))
+        if not normalized_text:
+            continue
+
+        if any(
+            normalized_text == variant
+            or normalized_text.startswith(f"{variant} ")
+            or normalized_text.endswith(f" {variant}")
+            or f" {variant} " in f" {normalized_text} "
+            for variant in normalized_variants
+        ):
+            anchors.append(entry)
+
+    return anchors
+
+
+def _find_anchor_right_words(words: list[dict[str, Any]], anchor_bbox: dict[str, Any]) -> list[dict[str, Any]]:
+    anchor_left = float(anchor_bbox.get("left") or 0)
+    anchor_top = float(anchor_bbox.get("top") or 0)
+    anchor_width = max(1.0, float(anchor_bbox.get("width") or 0))
+    anchor_height = max(1.0, float(anchor_bbox.get("height") or 0))
+    anchor_right = anchor_left + anchor_width
+    anchor_center_y = anchor_top + (anchor_height / 2.0)
+
+    candidates = [
+        word for word in words
+        if isinstance(word.get("bbox"), dict)
+        and float(word["bbox"].get("left") or 0) >= (anchor_right - anchor_width * 0.15)
+        and abs(_bbox_center_y(word["bbox"]) - anchor_center_y) <= anchor_height * 0.9
+        and float(word["bbox"].get("left") or 0) <= anchor_right + anchor_width * 2.8
+    ]
+    return sorted(candidates, key=lambda word: float(word["bbox"].get("left") or 0))
+
+
+def _find_anchor_below_words(words: list[dict[str, Any]], anchor_bbox: dict[str, Any]) -> list[dict[str, Any]]:
+    anchor_left = float(anchor_bbox.get("left") or 0)
+    anchor_top = float(anchor_bbox.get("top") or 0)
+    anchor_width = max(1.0, float(anchor_bbox.get("width") or 0))
+    anchor_height = max(1.0, float(anchor_bbox.get("height") or 0))
+    anchor_bottom = anchor_top + anchor_height
+
+    candidates = [
+        word for word in words
+        if isinstance(word.get("bbox"), dict)
+        and float(word["bbox"].get("top") or 0) >= anchor_bottom - anchor_height * 0.1
+        and float(word["bbox"].get("top") or 0) <= anchor_bottom + anchor_height * 2.8
+        and _bbox_center_x(word["bbox"]) >= anchor_left - anchor_width * 0.25
+        and _bbox_center_x(word["bbox"]) <= anchor_left + anchor_width * 1.8
+    ]
+    return sorted(
+        candidates,
+        key=lambda word: (
+            float(word["bbox"].get("top") or 0),
+            float(word["bbox"].get("left") or 0),
+        ),
+    )
+
+
+def _find_anchor_left_words(words: list[dict[str, Any]], anchor_bbox: dict[str, Any]) -> list[dict[str, Any]]:
+    anchor_left = float(anchor_bbox.get("left") or 0)
+    anchor_top = float(anchor_bbox.get("top") or 0)
+    anchor_width = max(1.0, float(anchor_bbox.get("width") or 0))
+    anchor_height = max(1.0, float(anchor_bbox.get("height") or 0))
+    anchor_center_y = anchor_top + (anchor_height / 2.0)
+
+    candidates = [
+        word for word in words
+        if isinstance(word.get("bbox"), dict)
+        and float(word["bbox"].get("left") or 0) + float(word["bbox"].get("width") or 0) <= anchor_left + anchor_width * 0.15
+        and float(word["bbox"].get("left") or 0) >= anchor_left - anchor_width * 1.8
+        and abs(_bbox_center_y(word["bbox"]) - anchor_center_y) <= anchor_height * 0.9
+    ]
+    return sorted(candidates, key=lambda word: float(word["bbox"].get("left") or 0))
+
+
+def _append_anchor_word_candidates(
+    candidates: list[dict[str, Any]],
+    seen_keys: set[tuple[str, tuple[str, ...], str]],
+    words: list[dict[str, Any]],
+    *,
+    source: str,
+) -> None:
+    if not words:
+        return
+
+    for row_words in _group_words_by_row(words):
+        if not row_words:
+            continue
+
+        _append_candidate(
+            candidates,
+            seen_keys,
+            text=" ".join(str(word.get("text") or "").strip() for word in row_words).strip(),
+            words=row_words,
+            line_ids=[str(word.get("line_id") or "") for word in row_words if word.get("line_id")],
+            source=source,
+        )
+
+        max_span_length = min(6, len(row_words))
+        for start_index in range(len(row_words)):
+            for span_length in range(1, max_span_length + 1):
+                end_index = start_index + span_length
+                if end_index > len(row_words):
+                    break
+                span_words = row_words[start_index:end_index]
+                _append_candidate(
+                    candidates,
+                    seen_keys,
+                    text=" ".join(str(word.get("text") or "").strip() for word in span_words).strip(),
+                    words=span_words,
+                    line_ids=[str(word.get("line_id") or "") for word in span_words if word.get("line_id")],
+                    source=source,
+                )
+
+
+def _group_words_by_row(words: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    sorted_words = sorted(
+        words,
+        key=lambda word: (
+            float(word.get("bbox", {}).get("top") or 0),
+            float(word.get("bbox", {}).get("left") or 0),
+        ),
+    )
+    grouped_rows: list[list[dict[str, Any]]] = []
+
+    for word in sorted_words:
+        bbox = word.get("bbox") or {}
+        word_center_y = _bbox_center_y(bbox)
+        word_height = max(1.0, float(bbox.get("height") or 0))
+        previous_row = grouped_rows[-1] if grouped_rows else None
+        if previous_row is None:
+            grouped_rows.append([word])
+            continue
+
+        previous_bbox = previous_row[-1].get("bbox") or {}
+        previous_center_y = _bbox_center_y(previous_bbox)
+        previous_height = max(1.0, float(previous_bbox.get("height") or 0))
+        if abs(word_center_y - previous_center_y) <= min(word_height, previous_height) * 0.6:
+            previous_row.append(word)
+        else:
+            grouped_rows.append([word])
+
+    return [
+        sorted(
+            row_words,
+            key=lambda word: float(word.get("bbox", {}).get("left") or 0),
+        )
+        for row_words in grouped_rows
+    ]
+
+
+def _bbox_center_x(bbox: dict[str, Any]) -> float:
+    return float(bbox.get("left") or 0) + (float(bbox.get("width") or 0) / 2.0)
+
+
+def _bbox_center_y(bbox: dict[str, Any]) -> float:
+    return float(bbox.get("top") or 0) + (float(bbox.get("height") or 0) / 2.0)
+
+
+def _anchor_candidate_bonus(field_key: str, candidate: dict[str, Any]) -> float:
+    source = str(candidate.get("source") or "")
+    if field_key not in _FIELD_ANCHOR_LABELS or not source.startswith("anchor_"):
+        return 0.0
+    return 0.015
 
 
 def _score_candidate(
@@ -466,11 +724,42 @@ def _safe_normalize_date(value: str) -> str:
     try:
         normalized = normalize_date(value)
     except Exception:
-        return ""
+        normalized = ""
 
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", normalized):
         return normalized
+
+    alpha_month_normalized = _normalize_alpha_month_date(value)
+    if alpha_month_normalized:
+        return alpha_month_normalized
     return ""
+
+
+def _normalize_alpha_month_date(value: str) -> str:
+    cleaned_value = _normalize_text(str(value or ""))
+    if not cleaned_value:
+        return ""
+
+    match = _ALPHA_MONTH_DATE_PATTERN.search(cleaned_value)
+    if not match:
+        return ""
+
+    day_value = int(match.group(1))
+    month_text = match.group(2).upper()
+    year_value = int(match.group(3))
+    month_value = _MONTH_NAME_MAP.get(month_text)
+    if month_value is None:
+        return ""
+
+    if year_value < 100:
+        year_value += 2000 if year_value < 30 else 1900
+
+    try:
+        parsed = datetime(year_value, month_value, day_value)
+    except ValueError:
+        return ""
+
+    return parsed.strftime("%Y-%m-%d")
 
 
 def _normalize_text(value: str) -> str:

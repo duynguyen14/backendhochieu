@@ -11,6 +11,7 @@ from app.api.routes.mask_review import router as mask_review_router
 from app.api.routes.passport_inference import router as passport_inference_router
 from app.api.routes.passport_records import router as passport_records_router
 from app.config import get_frontend_allowed_origins
+from app.services.passport_face_match_service import preload_passport_face_match_runtime
 from app.services.ocr_service import preload_ocr_runtime
 from app.services.passport_inference_service import preload_passport_inference_runtime
 from app.services.passport_portrait_service import preload_passport_portrait_runtime
@@ -38,11 +39,15 @@ app.include_router(mask_review_router, prefix="/api")
 @app.on_event("startup")
 async def preload_backend_runtime() -> None:
     logger = logging.getLogger(__name__)
-    logger.info("Preloading OCR, Donut, and portrait detection runtimes")
+    logger.info("Preloading OCR, Donut, portrait detection, and face match runtimes")
     await asyncio.to_thread(preload_ocr_runtime, fast_mode=True, include_orientation=True)
     await asyncio.to_thread(preload_passport_inference_runtime)
     await asyncio.to_thread(preload_passport_portrait_runtime)
-    logger.info("Finished preloading OCR, Donut, and portrait detection runtimes")
+    try:
+        await asyncio.to_thread(preload_passport_face_match_runtime)
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Face match runtime preload skipped: %s", exc)
+    logger.info("Finished preloading OCR, Donut, portrait detection, and face match runtimes")
 
 
 @app.get("/health")
