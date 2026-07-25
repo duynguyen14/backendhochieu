@@ -14,6 +14,8 @@ _MULTISPACE_PATTERN = re.compile(r"\s+")
 _DIGIT_PATTERN = re.compile(r"\d+")
 _DATE_COMPACT_PATTERN = re.compile(r"^\d{8}$")
 _ALPHA_MONTH_DATE_PATTERN = re.compile(r"\b(\d{1,2})\s+([A-Z]{3,9})\s+(\d{2,4})\b")
+_PARTIAL_YEAR_MONTH_PATTERN = re.compile(r"\b(\d{4})[-/ ](\d{1,2})\b")
+_HIGH_OCR_CONFIDENCE = 0.92
 
 _FIELD_MATCH_THRESHOLDS: dict[str, float] = {
     "passport_type": 0.99,
@@ -22,7 +24,7 @@ _FIELD_MATCH_THRESHOLDS: dict[str, float] = {
     "given_names": 0.72,
     "passport_number": 0.92,
     "sex": 0.99,
-    "date_of_birth": 0.95,
+    "date_of_birth": 0.82,
     "place_of_birth": 0.72,
     "nationality_current": 0.99,
     "nationality_at_birth": 0.99,
@@ -37,6 +39,8 @@ _FIELD_ANCHOR_LABELS: dict[str, tuple[str, ...]] = {
         "DATE OF BIRTH",
         "BIRTH",
         "DATE BIRTH",
+        "BIRTH DATE",
+        "DOB",
     ),
     "passport_type": (
         "TYPE",
@@ -251,8 +255,23 @@ def _append_candidate(
             "line_ids": [line_id for line_id in line_ids if line_id],
             "bbox": bbox,
             "source": source,
+            "confidence": _average_word_confidence(words),
         }
     )
+
+
+def _average_word_confidence(words: list[dict[str, Any]]) -> float:
+    confidence_values: list[float] = []
+    for word in words:
+        try:
+            confidence_values.append(float(word.get("confidence")))
+        except (TypeError, ValueError):
+            continue
+
+    if not confidence_values:
+        return 0.0
+
+    return sum(confidence_values) / len(confidence_values)
 
 
 def _merge_bboxes(
@@ -339,9 +358,9 @@ def _build_anchor_candidates(field_key: str, overlay: dict[str, Any]) -> list[di
     if not isinstance(lines, list) or not isinstance(words, list):
         return []
 
-    anchors = _find_anchor_entries(lines, label_variants)
+    anchors = _find_anchor_entries(lines, label_variants, field_key=field_key)
     if not anchors and field_key == "passport_type":
-        anchors = _find_anchor_entries(words, label_variants)
+        anchors = _find_anchor_entries(words, label_variants, field_key=field_key)
     if not anchors:
         return []
 
@@ -353,10 +372,10 @@ def _build_anchor_candidates(field_key: str, overlay: dict[str, Any]) -> list[di
         if not isinstance(anchor_bbox, dict):
             continue
 
-        right_words = _find_anchor_right_words(words, anchor_bbox)
+        right_words = _find_anchor_right_words(words, anchor_bbox, field_key=field_key)
         _append_anchor_word_candidates(candidates, seen_keys, right_words, source="anchor_right")
 
-        below_words = _find_anchor_below_words(words, anchor_bbox)
+        below_words = _find_anchor_below_words(words, anchor_bbox, field_key=field_key)
         _append_anchor_word_candidates(candidates, seen_keys, below_words, source="anchor_below")
 
         if field_key == "passport_type":
@@ -366,13 +385,20 @@ def _build_anchor_candidates(field_key: str, overlay: dict[str, Any]) -> list[di
     return candidates
 
 
-def _find_anchor_entries(entries: list[dict[str, Any]], label_variants: tuple[str, ...]) -> list[dict[str, Any]]:
+def _find_anchor_entries(
+    entries: list[dict[str, Any]],
+    label_variants: tuple[str, ...],
+    *,
+    field_key: str,
+) -> list[dict[str, Any]]:
     anchors: list[dict[str, Any]] = []
     normalized_variants = [_normalize_text(label) for label in label_variants]
 
     for entry in entries:
         normalized_text = _normalize_text(str(entry.get("text") or ""))
         if not normalized_text:
+            continue
+        if field_key == "date_of_birth" and "PLACE" in normalized_text:
             continue
 
         if any(
@@ -387,30 +413,42 @@ def _find_anchor_entries(entries: list[dict[str, Any]], label_variants: tuple[st
     return anchors
 
 
-def _find_anchor_right_words(words: list[dict[str, Any]], anchor_bbox: dict[str, Any]) -> list[dict[str, Any]]:
+def _find_anchor_right_words(
+    words: list[dict[str, Any]],
+    anchor_bbox: dict[str, Any],
+    *,
+    field_key: str,
+) -> list[dict[str, Any]]:
     anchor_left = float(anchor_bbox.get("left") or 0)
     anchor_top = float(anchor_bbox.get("top") or 0)
     anchor_width = max(1.0, float(anchor_bbox.get("width") or 0))
     anchor_height = max(1.0, float(anchor_bbox.get("height") or 0))
     anchor_right = anchor_left + anchor_width
     anchor_center_y = anchor_top + (anchor_height / 2.0)
+    right_window = 5.8 if field_key in {"date_of_birth"} else 2.8
 
     candidates = [
         word for word in words
         if isinstance(word.get("bbox"), dict)
         and float(word["bbox"].get("left") or 0) >= (anchor_right - anchor_width * 0.15)
         and abs(_bbox_center_y(word["bbox"]) - anchor_center_y) <= anchor_height * 0.9
-        and float(word["bbox"].get("left") or 0) <= anchor_right + anchor_width * 2.8
+        and float(word["bbox"].get("left") or 0) <= anchor_right + anchor_width * right_window
     ]
     return sorted(candidates, key=lambda word: float(word["bbox"].get("left") or 0))
 
 
-def _find_anchor_below_words(words: list[dict[str, Any]], anchor_bbox: dict[str, Any]) -> list[dict[str, Any]]:
+def _find_anchor_below_words(
+    words: list[dict[str, Any]],
+    anchor_bbox: dict[str, Any],
+    *,
+    field_key: str,
+) -> list[dict[str, Any]]:
     anchor_left = float(anchor_bbox.get("left") or 0)
     anchor_top = float(anchor_bbox.get("top") or 0)
     anchor_width = max(1.0, float(anchor_bbox.get("width") or 0))
     anchor_height = max(1.0, float(anchor_bbox.get("height") or 0))
     anchor_bottom = anchor_top + anchor_height
+    below_right_window = 5.8 if field_key in {"date_of_birth"} else 1.8
 
     candidates = [
         word for word in words
@@ -418,7 +456,7 @@ def _find_anchor_below_words(words: list[dict[str, Any]], anchor_bbox: dict[str,
         and float(word["bbox"].get("top") or 0) >= anchor_bottom - anchor_height * 0.1
         and float(word["bbox"].get("top") or 0) <= anchor_bottom + anchor_height * 2.8
         and _bbox_center_x(word["bbox"]) >= anchor_left - anchor_width * 0.25
-        and _bbox_center_x(word["bbox"]) <= anchor_left + anchor_width * 1.8
+        and _bbox_center_x(word["bbox"]) <= anchor_left + anchor_width * below_right_window
     ]
     return sorted(
         candidates,
@@ -598,6 +636,39 @@ def _score_date_value(expected_value: str, candidate: dict[str, Any]) -> tuple[f
     if expected_variants & candidate_variants:
         return 1.0, "date"
 
+    expected_signature = _date_signature(expected_value)
+    candidate_signature = _date_signature(raw_text)
+    if candidate_signature is None:
+        candidate_signature = _date_signature(normalized_text)
+    if candidate_signature is None:
+        candidate_signature = _date_signature(compact_text)
+
+    source = str(candidate.get("source") or "")
+    is_anchor_candidate = source.startswith("anchor_")
+    candidate_confidence = float(candidate.get("confidence") or 0.0)
+
+    if (
+        is_anchor_candidate
+        and candidate_confidence >= _HIGH_OCR_CONFIDENCE
+        and _looks_like_date_value(raw_text)
+    ):
+        if expected_signature is None or candidate_signature is None:
+            return 0.86, "anchor_ocr_date"
+
+        if expected_signature["year"] == candidate_signature["year"]:
+            expected_month = expected_signature.get("month")
+            candidate_month = candidate_signature.get("month")
+            if expected_month and candidate_month and expected_month == candidate_month:
+                return 0.93, "anchor_ocr_date"
+            return 0.86, "anchor_ocr_date"
+
+    if expected_signature is not None and candidate_signature is not None:
+        if expected_signature["year"] == candidate_signature["year"]:
+            expected_month = expected_signature.get("month")
+            candidate_month = candidate_signature.get("month")
+            if expected_month and candidate_month and expected_month == candidate_month:
+                return 0.88, "date_partial"
+
     return 0.0, "none"
 
 
@@ -695,29 +766,100 @@ def _date_variants(value: str) -> set[str]:
         return set()
 
     variants: set[str] = set()
-    normalized_input = cleaned_value.replace(".", "/").replace(" ", "")
-    normalized_date = _safe_normalize_date(normalized_input)
-    if normalized_date:
-        variants.add(normalized_date)
-        variants.add(normalized_date.replace("-", ""))
-
-        try:
-            parsed = datetime.strptime(normalized_date, "%Y-%m-%d")
-        except ValueError:
-            parsed = None
-
-        if parsed is not None:
-            variants.add(parsed.strftime("%d/%m/%Y"))
-            variants.add(parsed.strftime("%d-%m-%Y"))
-            variants.add(parsed.strftime("%d%m%Y"))
-            variants.add(parsed.strftime("%y%m%d"))
+    for normalized_input in {
+        cleaned_value.replace(".", "/"),
+        cleaned_value.replace(".", "/").replace(" ", ""),
+    }:
+        normalized_date = _safe_normalize_date(normalized_input)
+        if normalized_date:
+            _add_full_date_variants(variants, normalized_date)
 
     digit_groups = _DIGIT_PATTERN.findall(cleaned_value)
     joined_digits = "".join(digit_groups)
     if _DATE_COMPACT_PATTERN.fullmatch(joined_digits):
         variants.add(joined_digits)
 
+    signature = _date_signature(cleaned_value)
+    if signature is not None:
+        year_value = int(signature["year"])
+        month_value = signature.get("month")
+        day_value = signature.get("day")
+        if month_value:
+            variants.add(f"{year_value:04d}-{int(month_value):02d}")
+            variants.add(f"{year_value:04d}{int(month_value):02d}")
+            variants.add(f"{int(month_value):02d}-{year_value:04d}")
+            variants.add(f"{int(month_value):02d}/{year_value:04d}")
+        if month_value and day_value:
+            try:
+                parsed = datetime(year_value, int(month_value), int(day_value))
+            except ValueError:
+                parsed = None
+            if parsed is not None:
+                _add_full_date_variants(variants, parsed.strftime("%Y-%m-%d"))
+
     return {variant for variant in variants if variant}
+
+
+def _add_full_date_variants(variants: set[str], normalized_date: str) -> None:
+    variants.add(normalized_date)
+    variants.add(normalized_date.replace("-", ""))
+
+    try:
+        parsed = datetime.strptime(normalized_date, "%Y-%m-%d")
+    except ValueError:
+        return
+
+    variants.add(parsed.strftime("%d/%m/%Y"))
+    variants.add(parsed.strftime("%d-%m-%Y"))
+    variants.add(parsed.strftime("%d%m%Y"))
+    variants.add(parsed.strftime("%y%m%d"))
+
+
+def _date_signature(value: str) -> dict[str, int | None] | None:
+    cleaned_value = str(value or "").strip()
+    if not cleaned_value:
+        return None
+
+    for normalized_input in {
+        cleaned_value.replace(".", "/"),
+        cleaned_value.replace(".", "/").replace(" ", ""),
+    }:
+        normalized_date = _safe_normalize_date(normalized_input)
+        if normalized_date:
+            try:
+                parsed = datetime.strptime(normalized_date, "%Y-%m-%d")
+            except ValueError:
+                continue
+            return {"year": parsed.year, "month": parsed.month, "day": parsed.day}
+
+    normalized_text = _normalize_text(cleaned_value)
+    partial_match = _PARTIAL_YEAR_MONTH_PATTERN.search(normalized_text.replace(" ", "-"))
+    if partial_match:
+        year_value = int(partial_match.group(1))
+        month_value = int(partial_match.group(2))
+        if 1 <= month_value <= 12:
+            return {"year": year_value, "month": month_value, "day": None}
+
+    digit_groups = _DIGIT_PATTERN.findall(cleaned_value)
+    if len(digit_groups) >= 2 and len(digit_groups[0]) == 4:
+        year_value = int(digit_groups[0])
+        month_value = int(digit_groups[1])
+        if 1 <= month_value <= 12:
+            return {"year": year_value, "month": month_value, "day": None}
+
+    return None
+
+
+def _looks_like_date_value(value: str) -> bool:
+    if _date_signature(value) is not None:
+        return True
+
+    normalized_text = _normalize_text(value)
+    if any(month_name in normalized_text.split(" ") for month_name in _MONTH_NAME_MAP):
+        return bool(re.search(r"\b\d{2,4}\b", normalized_text))
+
+    digit_groups = _DIGIT_PATTERN.findall(value)
+    return len(digit_groups) >= 2
 
 
 def _safe_normalize_date(value: str) -> str:
