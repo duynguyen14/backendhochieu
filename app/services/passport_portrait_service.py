@@ -12,6 +12,7 @@ from app.services.passport_face_match_service import detect_primary_face_bbox
 
 
 _FACE_CASCADE: Any | None = None
+_FACE_CASCADE_UNAVAILABLE = False
 
 
 def detect_passport_portrait(
@@ -142,14 +143,26 @@ def _detect_best_portrait_candidate(
 
 
 def _get_face_cascade():
-    global _FACE_CASCADE
+    global _FACE_CASCADE, _FACE_CASCADE_UNAVAILABLE
     if _FACE_CASCADE is not None:
         return _FACE_CASCADE
+    if _FACE_CASCADE_UNAVAILABLE:
+        return None
 
-    cascade_path = Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"
+    if not hasattr(cv2, "CascadeClassifier"):
+        _FACE_CASCADE_UNAVAILABLE = True
+        return None
+
+    haarcascades_dir = getattr(getattr(cv2, "data", None), "haarcascades", "")
+    if not haarcascades_dir:
+        _FACE_CASCADE_UNAVAILABLE = True
+        return None
+
+    cascade_path = Path(haarcascades_dir) / "haarcascade_frontalface_default.xml"
     cascade = cv2.CascadeClassifier(str(cascade_path))
     if cascade.empty():
-        raise RuntimeError(f"Could not load OpenCV face cascade: {cascade_path}")
+        _FACE_CASCADE_UNAVAILABLE = True
+        return None
 
     _FACE_CASCADE = cascade
     return _FACE_CASCADE
@@ -177,6 +190,8 @@ def _detect_face_candidates(
     grayscale = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     grayscale = cv2.equalizeHist(grayscale)
     cascade = _get_face_cascade()
+    if cascade is None:
+        return []
 
     min_face_width = max(36, int(image.shape[1] * 0.08))
     min_face_height = max(36, int(image.shape[0] * 0.12))
