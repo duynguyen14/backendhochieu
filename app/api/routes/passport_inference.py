@@ -19,7 +19,11 @@ from app.config import (
     get_log_dir,
     get_passport_inference_api_key,
 )
-from app.services.ocr_field_matcher import build_ocr_field_matches, serialize_field_matches_for_api
+from app.services.ocr_field_matcher import (
+    apply_high_confidence_ocr_date_overrides,
+    build_ocr_field_matches,
+    serialize_field_matches_for_api,
+)
 from app.services.passport_face_match_service import get_passport_face_match_runtime_info, verify_passport_face_match
 from app.services.passport_portrait_service import detect_passport_portrait
 from app.services.passport_inference_service import (
@@ -379,6 +383,7 @@ async def upload_passport_portrait_only(request: Request, file: UploadFile = Fil
     }
 
 
+@router.post("/passport-interface/upload")
 @router.post("/passport-inference/upload")
 async def upload_passport_inference(request: Request, payload: PassportInferenceUploadPayload):
     configured_api_key = get_passport_inference_api_key()
@@ -445,7 +450,8 @@ async def upload_passport_inference(request: Request, payload: PassportInference
     image_height = float(overlay.get("image_height") or 0)
     image_url = str(request.url_for("get_passport_inference_image", image_id=result["image_id"]))
     source_image = _build_source_image_payload(Path(str(result["image_path"])))
-    field_matches = build_ocr_field_matches(result.get("editable_fields"), overlay)
+    editable_fields = apply_high_confidence_ocr_date_overrides(result.get("editable_fields"), overlay)
+    field_matches = build_ocr_field_matches(editable_fields, overlay)
     try:
         face_image = await asyncio.to_thread(
             _build_face_image_payload,
@@ -461,7 +467,7 @@ async def upload_passport_inference(request: Request, payload: PassportInference
         "image_url": image_url,
         "image_content_type": source_image["content_type"],
         "image_base64": source_image["base64"],
-        "editable_fields": result["editable_fields"],
+        "editable_fields": editable_fields,
         "donut_raw_text": result["donut_raw_text"],
         "donut_json": result["donut_json"],
         "task_prompt": result["task_prompt"],

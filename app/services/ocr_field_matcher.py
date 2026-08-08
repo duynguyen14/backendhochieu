@@ -13,9 +13,11 @@ _NON_ALNUM_PATTERN = re.compile(r"[^0-9A-Z]+")
 _MULTISPACE_PATTERN = re.compile(r"\s+")
 _DIGIT_PATTERN = re.compile(r"\d+")
 _DATE_COMPACT_PATTERN = re.compile(r"^\d{8}$")
+_NUMERIC_DATE_TEXT_PATTERN = re.compile(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b")
 _ALPHA_MONTH_DATE_PATTERN = re.compile(r"\b(\d{1,2})\s+([A-Z]{3,9})\s+(\d{2,4})\b")
 _PARTIAL_YEAR_MONTH_PATTERN = re.compile(r"\b(\d{4})[-/ ](\d{1,2})\b")
 _HIGH_OCR_CONFIDENCE = 0.92
+_OCR_DATE_OVERRIDE_CONFIDENCE = 0.90
 
 _FIELD_MATCH_THRESHOLDS: dict[str, float] = {
     "passport_type": 0.99,
@@ -41,6 +43,16 @@ _FIELD_ANCHOR_LABELS: dict[str, tuple[str, ...]] = {
         "DATE BIRTH",
         "BIRTH DATE",
         "DOB",
+    ),
+    "date_of_expiry": (
+        "DATE OF EXPIRY",
+        "DATE OF EXPIRATION",
+        "EXPIRY DATE",
+        "EXPIRATION DATE",
+        "DATE EXPIRY",
+        "VALID UNTIL",
+        "EXPIRY",
+        "EXPIRATION",
     ),
     "passport_type": (
         "TYPE",
@@ -100,6 +112,41 @@ def build_ocr_field_matches(
         matches[field_key] = _find_best_match(field_key, expected_value, candidates, overlay)
 
     return matches
+
+
+def apply_high_confidence_ocr_date_overrides(
+    editable_fields: dict[str, Any] | None,
+    overlay: dict[str, Any] | None,
+    *,
+    min_confidence: float = _OCR_DATE_OVERRIDE_CONFIDENCE,
+) -> dict[str, str]:
+    normalized_fields = build_empty_passport_json()
+    if editable_fields:
+        for field_key in normalized_fields:
+            normalized_fields[field_key] = str(editable_fields.get(field_key) or "")
+
+    if not overlay:
+        return normalized_fields
+
+    base_candidates = _build_candidates(overlay)
+    for field_key in ("date_of_birth", "date_of_expiry"):
+        ocr_candidate = _find_high_confidence_ocr_date_candidate(
+            field_key,
+            base_candidates,
+            overlay,
+            min_confidence=min_confidence,
+        )
+        if ocr_candidate is None:
+            continue
+
+        ocr_date = str(ocr_candidate.get("normalized_date") or "")
+        current_date = _normalize_date_for_output(normalized_fields.get(field_key, ""))
+        if not ocr_date or current_date == ocr_date:
+            continue
+
+        normalized_fields[field_key] = ocr_date
+
+    return normalized_fields
 
 
 def serialize_field_matches_for_api(
@@ -348,6 +395,72 @@ def _find_best_match(
     }
 
 
+def _find_high_confidence_ocr_date_candidate(
+    field_key: str,
+    base_candidates: list[dict[str, Any]],
+    overlay: dict[str, Any],
+    *,
+    min_confidence: float,
+) -> dict[str, Any] | None:
+    candidate_pool = _build_anchor_candidates(field_key, overlay)
+    candidate_pool.extend(
+        candidate
+        for candidate in base_candidates
+        if _candidate_contains_anchor_label(field_key, candidate)
+    )
+    if not candidate_pool:
+        return None
+
+    best_candidate: dict[str, Any] | None = None
+    best_score = float("-inf")
+
+    for candidate in candidate_pool:
+        normalized_date = _normalize_date_for_output(str(candidate.get("text") or ""))
+        if not normalized_date:
+            continue
+
+        confidence = float(candidate.get("confidence") or 0.0)
+        if confidence < min_confidence:
+            continue
+
+        source = str(candidate.get("source") or "")
+        text = str(candidate.get("text") or "")
+        token_count = len([token for token in _normalize_text(text).split(" ") if token])
+        anchor_bonus = 2.0 if source.startswith("anchor_") else 0.0
+        compact_penalty = abs(token_count - 3) * 0.08
+        candidate_score = confidence + anchor_bonus - compact_penalty
+
+        if candidate_score <= best_score:
+            continue
+
+        best_score = candidate_score
+        best_candidate = {
+            **candidate,
+            "normalized_date": normalized_date,
+        }
+
+    return best_candidate
+
+
+def _candidate_contains_anchor_label(field_key: str, candidate: dict[str, Any]) -> bool:
+    label_variants = _FIELD_ANCHOR_LABELS.get(field_key)
+    if not label_variants:
+        return False
+
+    normalized_text = str(candidate.get("normalized_text") or "")
+    if not normalized_text:
+        normalized_text = _normalize_text(str(candidate.get("text") or ""))
+
+    normalized_variants = [_normalize_text(label) for label in label_variants]
+    return any(
+        normalized_text == variant
+        or normalized_text.startswith(f"{variant} ")
+        or normalized_text.endswith(f" {variant}")
+        or f" {variant} " in f" {normalized_text} "
+        for variant in normalized_variants
+    )
+
+
 def _build_anchor_candidates(field_key: str, overlay: dict[str, Any]) -> list[dict[str, Any]]:
     label_variants = _FIELD_ANCHOR_LABELS.get(field_key)
     if not label_variants:
@@ -425,7 +538,7 @@ def _find_anchor_right_words(
     anchor_height = max(1.0, float(anchor_bbox.get("height") or 0))
     anchor_right = anchor_left + anchor_width
     anchor_center_y = anchor_top + (anchor_height / 2.0)
-    right_window = 5.8 if field_key in {"date_of_birth"} else 2.8
+    right_window = 5.8 if field_key in {"date_of_birth", "date_of_expiry"} else 2.8
 
     candidates = [
         word for word in words
@@ -448,7 +561,7 @@ def _find_anchor_below_words(
     anchor_width = max(1.0, float(anchor_bbox.get("width") or 0))
     anchor_height = max(1.0, float(anchor_bbox.get("height") or 0))
     anchor_bottom = anchor_top + anchor_height
-    below_right_window = 5.8 if field_key in {"date_of_birth"} else 1.8
+    below_right_window = 5.8 if field_key in {"date_of_birth", "date_of_expiry"} else 1.8
 
     candidates = [
         word for word in words
@@ -758,6 +871,44 @@ def _code_variants(field_key: str, value: str) -> set[str]:
             return {"X", "OTHER", "UNKNOWN"}
 
     return {compact}
+
+
+def _normalize_date_for_output(value: str) -> str:
+    cleaned_value = str(value or "").strip()
+    if not cleaned_value:
+        return ""
+
+    for normalized_input in {
+        cleaned_value.replace(".", "/"),
+        cleaned_value.replace(".", "/").replace(" ", ""),
+    }:
+        normalized_date = _safe_normalize_date(normalized_input)
+        if normalized_date:
+            return normalized_date
+
+    numeric_match = _NUMERIC_DATE_TEXT_PATTERN.search(cleaned_value)
+    if numeric_match:
+        normalized_date = _safe_normalize_date(numeric_match.group(0))
+        if normalized_date:
+            return normalized_date
+
+    alpha_month_normalized = _normalize_alpha_month_date(cleaned_value)
+    if alpha_month_normalized:
+        return alpha_month_normalized
+
+    digit_groups = _DIGIT_PATTERN.findall(cleaned_value)
+    if len(digit_groups) >= 3:
+        first_value, second_value, third_value = digit_groups[:3]
+        if len(first_value) == 4:
+            candidate = f"{third_value}/{second_value}/{first_value}"
+        else:
+            candidate = f"{first_value}/{second_value}/{third_value}"
+
+        normalized_date = _safe_normalize_date(candidate)
+        if normalized_date:
+            return normalized_date
+
+    return ""
 
 
 def _date_variants(value: str) -> set[str]:
