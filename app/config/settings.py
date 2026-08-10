@@ -25,6 +25,7 @@ DEFAULT_DONUT_PROCESSOR_DIR = BASE_DIR / "models" / "donut" / "processor"
 DEFAULT_INFERENCE_UPLOAD_DIR = BASE_DIR / "uploads" / "passport_inference"
 DEFAULT_PASSPORT_PORTRAIT_OUTPUT_DIR = BASE_DIR / "uploads" / "passport_portraits"
 DEFAULT_FACE_MATCH_MODEL_DIR = BASE_DIR / "models" / "opencv_face"
+DEFAULT_DOCUMENT_TYPE_MODEL_DIR = BASE_DIR / "models" / "document_type_classifier" / "mobilenetv3_small_document_4class_v1"
 
 
 def load_env_file(env_file_path: Path = ENV_FILE_PATH) -> None:
@@ -348,3 +349,27 @@ def get_face_match_input_width() -> int:
 
 def get_face_match_input_height() -> int:
     return max(160, int(get_env_value("FACE_MATCH_INPUT_HEIGHT", "640")))
+
+
+def get_document_type_model_path() -> Path:
+    configured_path = get_env_value("DOCUMENT_TYPE_MODEL_PATH", str(DEFAULT_DOCUMENT_TYPE_MODEL_DIR))
+    return Path(configured_path).expanduser().resolve()
+
+
+def get_document_type_metadata_path() -> Path | None:
+    configured_path = get_env_value("DOCUMENT_TYPE_METADATA_PATH")
+    if not configured_path:
+        return None
+    return Path(configured_path).expanduser().resolve()
+
+
+def get_document_type_cpu_threads() -> int:
+    return max(1, int(get_env_value("DOCUMENT_TYPE_CPU_THREADS", "4")))
+
+
+def get_document_type_min_confidence() -> float:
+    return float(get_env_value("DOCUMENT_TYPE_MIN_CONFIDENCE", "0.0"))
+
+
+def get_document_type_warmup_enabled() -> bool:
+    return get_bool_env("DOCUMENT_TYPE_WARMUP", True)

@@ -7,10 +7,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes.code_values import router as code_values_router
+from app.api.routes.document_type_classifier import router as document_type_classifier_router
 from app.api.routes.mask_review import router as mask_review_router
 from app.api.routes.passport_inference import router as passport_inference_router
 from app.api.routes.passport_records import router as passport_records_router
 from app.config import get_frontend_allowed_origins
+from app.services.document_type_classifier_service import preload_document_type_classifier_runtime
 from app.services.passport_face_match_service import preload_passport_face_match_runtime
 from app.services.ocr_service import preload_ocr_runtime
 from app.services.passport_inference_service import preload_passport_inference_runtime
@@ -34,20 +36,23 @@ app.include_router(passport_records_router, prefix="/api")
 app.include_router(passport_inference_router, prefix="/api")
 app.include_router(code_values_router, prefix="/api")
 app.include_router(mask_review_router, prefix="/api")
+app.include_router(document_type_classifier_router, prefix="/api")
+app.include_router(document_type_classifier_router, include_in_schema=False)
 
 
 @app.on_event("startup")
 async def preload_backend_runtime() -> None:
     logger = logging.getLogger(__name__)
-    logger.info("Preloading OCR, Donut, portrait detection, and face match runtimes")
+    logger.info("Preloading OCR, Donut, portrait detection, face match, and document type runtimes")
     await asyncio.to_thread(preload_ocr_runtime, fast_mode=True, include_orientation=True)
     await asyncio.to_thread(preload_passport_inference_runtime)
     await asyncio.to_thread(preload_passport_portrait_runtime)
+    await asyncio.to_thread(preload_document_type_classifier_runtime)
     try:
         await asyncio.to_thread(preload_passport_face_match_runtime)
     except Exception as exc:  # pragma: no cover
         logger.warning("Face match runtime preload skipped: %s", exc)
-    logger.info("Finished preloading OCR, Donut, portrait detection, and face match runtimes")
+    logger.info("Finished preloading OCR, Donut, portrait detection, face match, and document type runtimes")
 
 
 @app.get("/health")
