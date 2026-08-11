@@ -539,7 +539,7 @@ async def upload_passport_portrait_only(request: Request, file: UploadFile = Fil
 @router.post("/passport-interface/upload")
 @router.post("/passport-inference/upload")
 async def upload_passport_inference(request: Request, payload: PassportInferenceUploadPayload):
-    request_id = uuid4().hex[:12]
+    request_id = str(getattr(request.state, "passport_upload_request_id", "") or uuid4().hex[:12])
     request_started = perf_counter()
     _safe_append_inference_stage_log(
         request_id=request_id,
