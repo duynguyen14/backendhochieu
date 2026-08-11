@@ -8,6 +8,7 @@ from pathlib import Path
 from threading import Lock
 from time import perf_counter
 import threading
+from uuid import uuid4
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
@@ -106,6 +107,67 @@ def _get_inference_request_log_file_path(current_time: datetime) -> Path:
     return date_folder / "passport_inference_requests.txt"
 
 
+def _get_inference_stage_log_file_path(current_time: datetime) -> Path:
+    date_folder = get_log_dir() / current_time.strftime("%Y-%m-%d")
+    date_folder.mkdir(parents=True, exist_ok=True)
+    return date_folder / "passport_inference_stage_trace.txt"
+
+
+def _append_inference_stage_log(
+    *,
+    request_id: str,
+    stage: str,
+    detail: str = "",
+    request: Request | None = None,
+    image_id: str = "",
+    file_name: str = "",
+    elapsed_ms: float | None = None,
+    extra: dict[str, object] | None = None,
+) -> None:
+    current_time = datetime.now()
+    client_ip = request.client.host if request and request.client else ""
+    log_item: dict[str, object] = {
+        "timestamp": current_time.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+        "request_id": request_id,
+        "client_ip": client_ip,
+        "path": str(request.url.path) if request else "",
+        "method": request.method if request else "",
+        "stage": stage,
+        "detail": detail,
+        "image_id": image_id,
+        "file_name": file_name,
+        "thread": threading.current_thread().name,
+    }
+    if elapsed_ms is not None:
+        log_item["elapsed_ms"] = round(float(elapsed_ms), 2)
+    if extra:
+        log_item["extra"] = extra
+
+    console_parts = [
+        f"[passport-upload][{log_item['timestamp']}][{request_id}]",
+        str(stage),
+    ]
+    if detail:
+        console_parts.append(str(detail))
+    if image_id:
+        console_parts.append(f"image_id={image_id}")
+    if elapsed_ms is not None:
+        console_parts.append(f"elapsed_ms={round(float(elapsed_ms), 2)}")
+    print(" ".join(console_parts), flush=True)
+
+    log_file_path = _get_inference_stage_log_file_path(current_time)
+    with _INFERENCE_REQUEST_LOG_LOCK:
+        with log_file_path.open("a", encoding="utf-8") as log_file:
+            log_file.write(json.dumps(log_item, ensure_ascii=False) + "\n")
+
+
+def _safe_append_inference_stage_log(**kwargs: object) -> None:
+    try:
+        _append_inference_stage_log(**kwargs)
+    except Exception:
+        return
+
+
 def _append_inference_request_log(
     *,
     request: Request,
@@ -160,14 +222,105 @@ def _safe_append_inference_request_log(**kwargs: object) -> None:
         return
 
 
-def _run_ocr_stage_limited(image_path: Path) -> dict[str, object]:
-    with _INFERENCE_OCR_STAGE_LIMIT:
-        return run_passport_ocr_stage(image_path)
+def _run_ocr_stage_limited(image_path: Path, *, request_id: str, image_id: str, file_name: str) -> dict[str, object]:
+    wait_started = perf_counter()
+    _safe_append_inference_stage_log(
+        request_id=request_id,
+        stage="ocr_wait_semaphore",
+        image_id=image_id,
+        file_name=file_name,
+    )
+    _INFERENCE_OCR_STAGE_LIMIT.acquire()
+    wait_duration_ms = (perf_counter() - wait_started) * 1000
+    try:
+        _safe_append_inference_stage_log(
+            request_id=request_id,
+            stage="ocr_start",
+            image_id=image_id,
+            file_name=file_name,
+            elapsed_ms=wait_duration_ms,
+        )
+        run_started = perf_counter()
+        result = run_passport_ocr_stage(image_path)
+        _safe_append_inference_stage_log(
+            request_id=request_id,
+            stage="ocr_done",
+            image_id=image_id,
+            file_name=file_name,
+            elapsed_ms=(perf_counter() - run_started) * 1000,
+            extra={
+                "word_count": len(result.get("words", [])),
+                "line_count": len(result.get("lines", [])),
+            },
+        )
+        return result
+    except Exception as exc:
+        _safe_append_inference_stage_log(
+            request_id=request_id,
+            stage="ocr_error",
+            detail=str(exc),
+            image_id=image_id,
+            file_name=file_name,
+        )
+        raise
+    finally:
+        _INFERENCE_OCR_STAGE_LIMIT.release()
+        _safe_append_inference_stage_log(
+            request_id=request_id,
+            stage="ocr_release_semaphore",
+            image_id=image_id,
+            file_name=file_name,
+        )
 
 
-def _run_donut_stage_limited(image_path: Path) -> dict[str, object]:
-    with _INFERENCE_DONUT_STAGE_LIMIT:
-        return run_passport_donut_stage(image_path)
+def _run_donut_stage_limited(image_path: Path, *, request_id: str, image_id: str, file_name: str) -> dict[str, object]:
+    wait_started = perf_counter()
+    _safe_append_inference_stage_log(
+        request_id=request_id,
+        stage="donut_wait_semaphore",
+        image_id=image_id,
+        file_name=file_name,
+    )
+    _INFERENCE_DONUT_STAGE_LIMIT.acquire()
+    wait_duration_ms = (perf_counter() - wait_started) * 1000
+    try:
+        _safe_append_inference_stage_log(
+            request_id=request_id,
+            stage="donut_start",
+            image_id=image_id,
+            file_name=file_name,
+            elapsed_ms=wait_duration_ms,
+        )
+        run_started = perf_counter()
+        result = run_passport_donut_stage(image_path)
+        _safe_append_inference_stage_log(
+            request_id=request_id,
+            stage="donut_done",
+            image_id=image_id,
+            file_name=file_name,
+            elapsed_ms=(perf_counter() - run_started) * 1000,
+            extra={
+                "editable_field_count": len(result.get("editable_fields", {})),
+            },
+        )
+        return result
+    except Exception as exc:
+        _safe_append_inference_stage_log(
+            request_id=request_id,
+            stage="donut_error",
+            detail=str(exc),
+            image_id=image_id,
+            file_name=file_name,
+        )
+        raise
+    finally:
+        _INFERENCE_DONUT_STAGE_LIMIT.release()
+        _safe_append_inference_stage_log(
+            request_id=request_id,
+            stage="donut_release_semaphore",
+            image_id=image_id,
+            file_name=file_name,
+        )
 
 
 def _build_face_image_payload(image_path: Path, overlay: dict[str, object]) -> dict[str, object]:
@@ -386,6 +539,17 @@ async def upload_passport_portrait_only(request: Request, file: UploadFile = Fil
 @router.post("/passport-interface/upload")
 @router.post("/passport-inference/upload")
 async def upload_passport_inference(request: Request, payload: PassportInferenceUploadPayload):
+    request_id = uuid4().hex[:12]
+    request_started = perf_counter()
+    _safe_append_inference_stage_log(
+        request_id=request_id,
+        stage="request_received",
+        request=request,
+        file_name=payload.file_name,
+        extra={
+            "base64_length": len(str(payload.base64 or "")),
+        },
+    )
     configured_api_key = get_passport_inference_api_key()
     _validate_inference_api_key(
         configured_api_key=configured_api_key,
@@ -393,23 +557,94 @@ async def upload_passport_inference(request: Request, payload: PassportInference
         request=request,
         payload=payload,
     )
+    _safe_append_inference_stage_log(
+        request_id=request_id,
+        stage="api_key_valid",
+        request=request,
+        file_name=payload.file_name,
+        elapsed_ms=(perf_counter() - request_started) * 1000,
+    )
 
     try:
         total_started = perf_counter()
+        _safe_append_inference_stage_log(
+            request_id=request_id,
+            stage="decode_base64_start",
+            request=request,
+            file_name=payload.file_name,
+            elapsed_ms=(perf_counter() - request_started) * 1000,
+        )
         file_bytes, resolved_file_name = decode_base64_image_payload(payload.base64, payload.file_name)
+        _safe_append_inference_stage_log(
+            request_id=request_id,
+            stage="decode_base64_done",
+            request=request,
+            file_name=resolved_file_name,
+            elapsed_ms=(perf_counter() - request_started) * 1000,
+            extra={
+                "file_size_bytes": len(file_bytes),
+            },
+        )
+        _safe_append_inference_stage_log(
+            request_id=request_id,
+            stage="prepare_inference_start",
+            request=request,
+            file_name=resolved_file_name,
+            elapsed_ms=(perf_counter() - request_started) * 1000,
+        )
         image_id, image_path, cached_result = prepare_passport_inference(file_bytes, resolved_file_name)
+        _safe_append_inference_stage_log(
+            request_id=request_id,
+            stage="prepare_inference_done",
+            request=request,
+            image_id=image_id,
+            file_name=resolved_file_name,
+            elapsed_ms=(perf_counter() - request_started) * 1000,
+            extra={
+                "cache_hit": cached_result is not None,
+                "image_path": str(image_path),
+            },
+        )
         if cached_result is not None:
+            _safe_append_inference_stage_log(
+                request_id=request_id,
+                stage="cache_hit",
+                request=request,
+                image_id=image_id,
+                file_name=resolved_file_name,
+                elapsed_ms=(perf_counter() - request_started) * 1000,
+            )
             result = cached_result
         else:
             ocr_started = perf_counter()
-            overlay = await asyncio.to_thread(_run_ocr_stage_limited, image_path)
+            overlay = await asyncio.to_thread(
+                _run_ocr_stage_limited,
+                image_path,
+                request_id=request_id,
+                image_id=image_id,
+                file_name=resolved_file_name,
+            )
             ocr_duration_ms = round((perf_counter() - ocr_started) * 1000, 2)
 
             donut_started = perf_counter()
-            donut_result = await asyncio.to_thread(_run_donut_stage_limited, image_path)
+            donut_result = await asyncio.to_thread(
+                _run_donut_stage_limited,
+                image_path,
+                request_id=request_id,
+                image_id=image_id,
+                file_name=resolved_file_name,
+            )
             donut_duration_ms = round((perf_counter() - donut_started) * 1000, 2)
             total_duration_ms = round((perf_counter() - total_started) * 1000, 2)
 
+            _safe_append_inference_stage_log(
+                request_id=request_id,
+                stage="build_result_start",
+                request=request,
+                image_id=image_id,
+                file_name=resolved_file_name,
+                elapsed_ms=(perf_counter() - request_started) * 1000,
+            )
             result = build_passport_inference_result(
                 image_id=image_id,
                 image_path=image_path,
@@ -420,7 +655,23 @@ async def upload_passport_inference(request: Request, payload: PassportInference
                 donut_duration_ms=donut_duration_ms,
                 total_duration_ms=total_duration_ms,
             )
+            _safe_append_inference_stage_log(
+                request_id=request_id,
+                stage="build_result_done",
+                request=request,
+                image_id=image_id,
+                file_name=resolved_file_name,
+                elapsed_ms=(perf_counter() - request_started) * 1000,
+            )
     except ValueError as exc:
+        _safe_append_inference_stage_log(
+            request_id=request_id,
+            stage="request_error",
+            detail=str(exc),
+            request=request,
+            file_name=payload.file_name,
+            elapsed_ms=(perf_counter() - request_started) * 1000,
+        )
         _safe_append_inference_request_log(
             request=request,
             payload=payload,
@@ -429,6 +680,14 @@ async def upload_passport_inference(request: Request, payload: PassportInference
         )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
+        _safe_append_inference_stage_log(
+            request_id=request_id,
+            stage="request_error",
+            detail=str(exc),
+            request=request,
+            file_name=payload.file_name,
+            elapsed_ms=(perf_counter() - request_started) * 1000,
+        )
         _safe_append_inference_request_log(
             request=request,
             payload=payload,
@@ -437,6 +696,14 @@ async def upload_passport_inference(request: Request, payload: PassportInference
         )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
+        _safe_append_inference_stage_log(
+            request_id=request_id,
+            stage="request_error",
+            detail=f"Passport inference failed: {exc}",
+            request=request,
+            file_name=payload.file_name,
+            elapsed_ms=(perf_counter() - request_started) * 1000,
+        )
         _safe_append_inference_request_log(
             request=request,
             payload=payload,
@@ -449,18 +716,90 @@ async def upload_passport_inference(request: Request, payload: PassportInference
     image_width = float(overlay.get("image_width") or 0)
     image_height = float(overlay.get("image_height") or 0)
     image_url = str(request.url_for("get_passport_inference_image", image_id=result["image_id"]))
+    _safe_append_inference_stage_log(
+        request_id=request_id,
+        stage="source_image_payload_start",
+        request=request,
+        image_id=str(result["image_id"]),
+        file_name=str(result["image_name"]),
+        elapsed_ms=(perf_counter() - request_started) * 1000,
+    )
     source_image = _build_source_image_payload(Path(str(result["image_path"])))
+    _safe_append_inference_stage_log(
+        request_id=request_id,
+        stage="source_image_payload_done",
+        request=request,
+        image_id=str(result["image_id"]),
+        file_name=str(result["image_name"]),
+        elapsed_ms=(perf_counter() - request_started) * 1000,
+        extra={
+            "image_base64_length": len(str(source_image.get("base64") or "")),
+        },
+    )
+    _safe_append_inference_stage_log(
+        request_id=request_id,
+        stage="field_match_start",
+        request=request,
+        image_id=str(result["image_id"]),
+        file_name=str(result["image_name"]),
+        elapsed_ms=(perf_counter() - request_started) * 1000,
+    )
     editable_fields = apply_high_confidence_ocr_date_overrides(result.get("editable_fields"), overlay)
     field_matches = build_ocr_field_matches(editable_fields, overlay)
+    _safe_append_inference_stage_log(
+        request_id=request_id,
+        stage="field_match_done",
+        request=request,
+        image_id=str(result["image_id"]),
+        file_name=str(result["image_name"]),
+        elapsed_ms=(perf_counter() - request_started) * 1000,
+    )
     try:
+        _safe_append_inference_stage_log(
+            request_id=request_id,
+            stage="face_crop_start",
+            request=request,
+            image_id=str(result["image_id"]),
+            file_name=str(result["image_name"]),
+            elapsed_ms=(perf_counter() - request_started) * 1000,
+        )
         face_image = await asyncio.to_thread(
             _build_face_image_payload,
             Path(str(result["image_path"])),
             overlay,
         )
-    except Exception:
+        _safe_append_inference_stage_log(
+            request_id=request_id,
+            stage="face_crop_done",
+            request=request,
+            image_id=str(result["image_id"]),
+            file_name=str(result["image_name"]),
+            elapsed_ms=(perf_counter() - request_started) * 1000,
+            extra={
+                "detected": bool(face_image.get("detected")),
+                "face_base64_length": len(str(face_image.get("base64") or "")),
+            },
+        )
+    except Exception as exc:
+        _safe_append_inference_stage_log(
+            request_id=request_id,
+            stage="face_crop_error",
+            detail=str(exc),
+            request=request,
+            image_id=str(result["image_id"]),
+            file_name=str(result["image_name"]),
+            elapsed_ms=(perf_counter() - request_started) * 1000,
+        )
         face_image = _build_empty_face_image()
 
+    _safe_append_inference_stage_log(
+        request_id=request_id,
+        stage="response_build_start",
+        request=request,
+        image_id=str(result["image_id"]),
+        file_name=str(result["image_name"]),
+        elapsed_ms=(perf_counter() - request_started) * 1000,
+    )
     response_data = {
         "image_id": result["image_id"],
         "image_name": result["image_name"],
@@ -485,6 +824,14 @@ async def upload_passport_inference(request: Request, payload: PassportInference
             "field_matches": serialize_field_matches_for_api(field_matches, image_width, image_height),
         },
     }
+    _safe_append_inference_stage_log(
+        request_id=request_id,
+        stage="response_build_done",
+        request=request,
+        image_id=str(result["image_id"]),
+        file_name=str(result["image_name"]),
+        elapsed_ms=(perf_counter() - request_started) * 1000,
+    )
 
     _safe_append_inference_request_log(
         request=request,
@@ -494,6 +841,17 @@ async def upload_passport_inference(request: Request, payload: PassportInference
         image_id=str(result.get("image_id") or ""),
         cache_hit=bool(result.get("performance", {}).get("cache_hit")),
         response_data=_build_loggable_response_data(response_data),
+    )
+    _safe_append_inference_stage_log(
+        request_id=request_id,
+        stage="request_completed",
+        request=request,
+        image_id=str(result["image_id"]),
+        file_name=str(result["image_name"]),
+        elapsed_ms=(perf_counter() - request_started) * 1000,
+        extra={
+            "cache_hit": bool(result.get("performance", {}).get("cache_hit")),
+        },
     )
 
     return {
