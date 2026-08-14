@@ -378,11 +378,11 @@ def _build_no_rotation_result(image_path: Path) -> dict[str, Any]:
     }
 
 
-def ensure_image_orientation(image_path: Path) -> dict[str, Any]:
+def ensure_image_orientation(image_path: Path, *, force: bool = False) -> dict[str, Any]:
     if not image_path.exists():
         raise FileNotFoundError(f"Image file not found: {image_path}")
 
-    if not get_ocr_auto_rotate_and_overwrite() or _is_orientation_check_cached(image_path):
+    if not force and (not get_ocr_auto_rotate_and_overwrite() or _is_orientation_check_cached(image_path)):
         return _build_no_rotation_result(image_path)
 
     pipeline = _get_doc_preprocessor_pipeline()

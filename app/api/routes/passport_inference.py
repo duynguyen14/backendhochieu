@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from app.config import (
+    get_inference_upload_dir,
     get_inference_donut_concurrency,
     get_inference_ocr_concurrency,
     get_log_dir,
@@ -25,6 +26,7 @@ from app.services.ocr_field_matcher import (
     build_ocr_field_matches,
     serialize_field_matches_for_api,
 )
+from app.services.ocr_service import ensure_image_orientation
 from app.services.passport_face_match_service import get_passport_face_match_runtime_info, verify_passport_face_match
 from app.services.passport_portrait_service import detect_passport_portrait
 from app.services.passport_inference_service import (
@@ -48,6 +50,12 @@ class PassportInferenceUploadPayload(BaseModel):
     api_key: str = Field(..., min_length=1)
     base64: str = Field(..., min_length=1)
     file_name: str = Field(default="passport_upload.jpg", min_length=1)
+
+
+class PassportImageRotatePayload(BaseModel):
+    api_key: str = Field(..., min_length=1)
+    base64: str = Field(..., min_length=1)
+    file_name: str = Field(default="passport_rotate.jpg", min_length=1)
 
 
 class PassportFaceVerifyPayload(BaseModel):
@@ -533,6 +541,90 @@ async def upload_passport_portrait_only(request: Request, file: UploadFile = Fil
             "image_width": image_width,
             "image_height": image_height,
         },
+    }
+
+
+@router.post("/passport-interface/rotate")
+@router.post("/passport-inference/rotate")
+async def rotate_passport_image(request: Request, payload: PassportImageRotatePayload):
+    configured_api_key = get_passport_inference_api_key()
+    _validate_inference_api_key(
+        configured_api_key=configured_api_key,
+        provided_api_key=payload.api_key,
+        request=request,
+        payload=payload,
+    )
+
+    try:
+        file_bytes, resolved_file_name = decode_base64_image_payload(payload.base64, payload.file_name)
+        rotate_dir = get_inference_upload_dir() / "rotate_only"
+        rotate_dir.mkdir(parents=True, exist_ok=True)
+        extension = Path(resolved_file_name).suffix.lower() or ".jpg"
+        image_id = f"{uuid4().hex}{extension}"
+        image_path = rotate_dir / image_id
+        image_path.write_bytes(file_bytes)
+        orientation = await asyncio.to_thread(ensure_image_orientation, image_path, force=True)
+        rotated_file_bytes = image_path.read_bytes()
+        rotated_base64 = base64.b64encode(rotated_file_bytes).decode("ascii")
+        content_type = _guess_content_type(image_path)
+        try:
+            image_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    except ValueError as exc:
+        _safe_append_inference_request_log(
+            request=request,
+            payload=payload,
+            status="error",
+            detail=str(exc),
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        _safe_append_inference_request_log(
+            request=request,
+            payload=payload,
+            status="error",
+            detail=str(exc),
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        _safe_append_inference_request_log(
+            request=request,
+            payload=payload,
+            status="error",
+            detail=f"Passport image rotation failed: {exc}",
+        )
+        raise HTTPException(status_code=500, detail=f"Passport image rotation failed: {exc}") from exc
+
+    response_data = {
+        "image_id": image_id,
+        "file_name": Path(resolved_file_name).name,
+        "content_type": content_type,
+        "base64": rotated_base64,
+        "rotated": bool(orientation.get("rotated")),
+        "angle": int(orientation.get("angle") or 0),
+        "original_width": int(orientation.get("original_width") or 0),
+        "original_height": int(orientation.get("original_height") or 0),
+        "current_width": int(orientation.get("current_width") or 0),
+        "current_height": int(orientation.get("current_height") or 0),
+    }
+
+    _safe_append_inference_request_log(
+        request=request,
+        payload=payload,
+        status="success",
+        detail="Passport image rotation completed",
+        image_id=image_id,
+        response_data={
+            **response_data,
+            "base64": "",
+            "base64_length": len(rotated_base64),
+        },
+    )
+
+    return {
+        "status": "success",
+        "data": response_data,
     }
 
 
