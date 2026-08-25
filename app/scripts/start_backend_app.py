@@ -10,6 +10,7 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from app.api.main import app as fastapi_app
 from app.config import get_api_host, get_api_port, get_log_dir
 
 
@@ -42,7 +43,7 @@ def main() -> None:
     logging.info("Log file: %s", log_file_path)
 
     uvicorn.run(
-        "app.api.main:app",
+        fastapi_app,
         host=host,
         port=port,
         reload=False,
