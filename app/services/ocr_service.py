@@ -16,6 +16,7 @@ from PIL import Image, ImageOps
 from app.config import (
     get_ocr_auto_rotate_and_overwrite,
     get_ocr_language,
+    load_env_file,
     get_paddle_doc_orientation_model_dir,
     get_paddle_model_source,
     get_paddle_ocr_device,
@@ -44,6 +45,14 @@ _DOC_PREPROCESSOR_PIPELINE: Any | None = None
 _DOC_PREPROCESSOR_LOCK = threading.Lock()
 _IMAGE_ORIENTATION_CHECK_CACHE: dict[str, tuple[int, int]] = {}
 _IMAGE_ORIENTATION_CACHE_LOCK = threading.Lock()
+
+
+def _configure_paddle_runtime_environment() -> None:
+    # Paddle runtime flags must be present before importing paddle/paddleocr.
+    load_env_file()
+    os.environ.setdefault("FLAGS_use_onednn", "false")
+    os.environ.setdefault("FLAGS_use_mkldnn", "false")
+    os.environ.setdefault("FLAGS_enable_mkldnn", "false")
 
 
 def normalize_path(path: Path) -> str:
@@ -125,6 +134,7 @@ def guess_structured_fields(raw_text: str) -> dict[str, str]:
 
 
 def _load_paddleocr_class():
+    _configure_paddle_runtime_environment()
     try:
         from paddleocr import PaddleOCR
     except ImportError as exc:  # pragma: no cover
@@ -138,6 +148,7 @@ def _load_paddleocr_class():
 
 
 def _load_doc_preprocessor_class():
+    _configure_paddle_runtime_environment()
     try:
         from paddleocr import DocPreprocessor
     except ImportError as exc:  # pragma: no cover
@@ -166,6 +177,7 @@ def _read_local_model_name(model_dir: Path) -> str | None:
 
 
 def _build_pipeline_kwargs(*, fast_mode: bool = False) -> dict[str, Any]:
+    _configure_paddle_runtime_environment()
     os.environ["PADDLE_PDX_MODEL_SOURCE"] = get_paddle_model_source()
 
     kwargs: dict[str, Any] = {
@@ -207,6 +219,7 @@ def _build_pipeline_kwargs(*, fast_mode: bool = False) -> dict[str, Any]:
 
 
 def _build_doc_preprocessor_kwargs() -> dict[str, Any]:
+    _configure_paddle_runtime_environment()
     os.environ["PADDLE_PDX_MODEL_SOURCE"] = get_paddle_model_source()
 
     kwargs: dict[str, Any] = {
