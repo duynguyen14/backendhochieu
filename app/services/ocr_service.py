@@ -5,6 +5,7 @@ import math
 import os
 import re
 import threading
+from inspect import Parameter, signature
 from datetime import datetime
 from pathlib import Path
 from statistics import median
@@ -53,6 +54,31 @@ def _configure_paddle_runtime_environment() -> None:
     os.environ.setdefault("FLAGS_use_onednn", "false")
     os.environ.setdefault("FLAGS_use_mkldnn", "false")
     os.environ.setdefault("FLAGS_enable_mkldnn", "false")
+    os.environ.setdefault("FLAGS_enable_pir_api", "0")
+    os.environ.setdefault("FLAGS_enable_pir_in_executor", "0")
+
+
+def _filter_supported_kwargs(callable_object: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    try:
+        callable_signature = signature(callable_object)
+    except (TypeError, ValueError):
+        return kwargs
+
+    parameters = callable_signature.parameters
+    if any(parameter.kind == Parameter.VAR_KEYWORD for parameter in parameters.values()):
+        return kwargs
+
+    return {
+        key: value
+        for key, value in kwargs.items()
+        if key in parameters
+    }
+
+
+def _add_paddle_cpu_runtime_kwargs(kwargs: dict[str, Any]) -> None:
+    kwargs.setdefault("enable_mkldnn", False)
+    kwargs.setdefault("mkldnn_cache_capacity", 0)
+    kwargs.setdefault("enable_hpi", False)
 
 
 def normalize_path(path: Path) -> str:
@@ -189,6 +215,7 @@ def _build_pipeline_kwargs(*, fast_mode: bool = False) -> dict[str, Any]:
         "use_textline_orientation": False if fast_mode else get_paddle_use_textline_orientation(),
         "return_word_box": True,
     }
+    _add_paddle_cpu_runtime_kwargs(kwargs)
 
     doc_orientation_model_dir = get_paddle_doc_orientation_model_dir()
     if doc_orientation_model_dir and not fast_mode:
@@ -227,6 +254,7 @@ def _build_doc_preprocessor_kwargs() -> dict[str, Any]:
         "use_doc_orientation_classify": True,
         "use_doc_unwarping": False,
     }
+    _add_paddle_cpu_runtime_kwargs(kwargs)
 
     doc_orientation_model_dir = get_paddle_doc_orientation_model_dir()
     if doc_orientation_model_dir:
@@ -244,7 +272,7 @@ def _get_ocr_pipeline():
     with _OCR_PIPELINE_LOCK:
         if _OCR_PIPELINE is None:
             PaddleOCR = _load_paddleocr_class()
-            _OCR_PIPELINE = PaddleOCR(**_build_pipeline_kwargs())
+            _OCR_PIPELINE = PaddleOCR(**_filter_supported_kwargs(PaddleOCR, _build_pipeline_kwargs()))
 
     return _OCR_PIPELINE
 
@@ -258,7 +286,7 @@ def _get_fast_ocr_pipeline():
     with _OCR_FAST_PIPELINE_LOCK:
         if _OCR_FAST_PIPELINE is None:
             PaddleOCR = _load_paddleocr_class()
-            _OCR_FAST_PIPELINE = PaddleOCR(**_build_pipeline_kwargs(fast_mode=True))
+            _OCR_FAST_PIPELINE = PaddleOCR(**_filter_supported_kwargs(PaddleOCR, _build_pipeline_kwargs(fast_mode=True)))
 
     return _OCR_FAST_PIPELINE
 
@@ -272,7 +300,9 @@ def _get_doc_preprocessor_pipeline():
     with _DOC_PREPROCESSOR_LOCK:
         if _DOC_PREPROCESSOR_PIPELINE is None:
             DocPreprocessor = _load_doc_preprocessor_class()
-            _DOC_PREPROCESSOR_PIPELINE = DocPreprocessor(**_build_doc_preprocessor_kwargs())
+            _DOC_PREPROCESSOR_PIPELINE = DocPreprocessor(
+                **_filter_supported_kwargs(DocPreprocessor, _build_doc_preprocessor_kwargs())
+            )
 
     return _DOC_PREPROCESSOR_PIPELINE
 
