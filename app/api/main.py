@@ -16,7 +16,7 @@ from app.api.routes.document_type_classifier import router as document_type_clas
 from app.api.routes.mask_review import router as mask_review_router
 from app.api.routes.passport_inference import router as passport_inference_router
 from app.api.routes.passport_records import router as passport_records_router
-from app.config import get_frontend_allowed_origins, get_log_dir
+from app.config import get_frontend_allowed_origins, get_inference_skip_ocr_auto_rotate, get_log_dir
 from app.services.document_type_classifier_service import preload_document_type_classifier_runtime
 from app.services.passport_face_match_service import preload_passport_face_match_runtime
 from app.services.ocr_service import preload_ocr_runtime
@@ -151,7 +151,10 @@ async def trace_passport_upload_request(request: Request, call_next):
 async def preload_backend_runtime() -> None:
     logger = logging.getLogger(__name__)
     logger.info("Preloading OCR, Donut, portrait detection, face match, and document type runtimes")
-    await asyncio.to_thread(preload_ocr_runtime, fast_mode=True, include_orientation=True)
+    include_ocr_orientation = not get_inference_skip_ocr_auto_rotate()
+    if not include_ocr_orientation:
+        logger.info("Skipping OCR orientation preprocessor preload because INFERENCE_SKIP_OCR_AUTO_ROTATE=true")
+    await asyncio.to_thread(preload_ocr_runtime, fast_mode=True, include_orientation=include_ocr_orientation)
     await asyncio.to_thread(preload_passport_inference_runtime)
     await asyncio.to_thread(preload_passport_portrait_runtime)
     await asyncio.to_thread(preload_document_type_classifier_runtime)

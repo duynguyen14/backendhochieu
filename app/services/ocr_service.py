@@ -15,6 +15,7 @@ import cv2
 from PIL import Image, ImageOps
 
 from app.config import (
+    get_bool_env,
     get_ocr_auto_rotate_and_overwrite,
     get_ocr_language,
     load_env_file,
@@ -51,11 +52,12 @@ _IMAGE_ORIENTATION_CACHE_LOCK = threading.Lock()
 def _configure_paddle_runtime_environment() -> None:
     # Paddle runtime flags must be present before importing paddle/paddleocr.
     load_env_file()
-    os.environ.setdefault("FLAGS_use_onednn", "false")
-    os.environ.setdefault("FLAGS_use_mkldnn", "false")
-    os.environ.setdefault("FLAGS_enable_mkldnn", "false")
-    os.environ.setdefault("FLAGS_enable_pir_api", "0")
-    os.environ.setdefault("FLAGS_enable_pir_in_executor", "0")
+    if get_bool_env("PADDLE_DISABLE_ONEDNN", False):
+        os.environ.setdefault("FLAGS_use_onednn", "false")
+        os.environ.setdefault("FLAGS_use_mkldnn", "false")
+        os.environ.setdefault("FLAGS_enable_mkldnn", "false")
+        os.environ.setdefault("FLAGS_enable_pir_api", "0")
+        os.environ.setdefault("FLAGS_enable_pir_in_executor", "0")
 
 
 def _filter_supported_kwargs(callable_object: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -76,6 +78,9 @@ def _filter_supported_kwargs(callable_object: Any, kwargs: dict[str, Any]) -> di
 
 
 def _add_paddle_cpu_runtime_kwargs(kwargs: dict[str, Any]) -> None:
+    if not get_bool_env("PADDLE_DISABLE_ONEDNN", False):
+        return
+
     kwargs.setdefault("enable_mkldnn", False)
     kwargs.setdefault("mkldnn_cache_capacity", 0)
     kwargs.setdefault("enable_hpi", False)
