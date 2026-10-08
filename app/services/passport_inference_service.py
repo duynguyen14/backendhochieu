@@ -33,7 +33,12 @@ from app.config import (
     get_passport_ocr_service_timeout_seconds,
     get_passport_ocr_service_url,
 )
-from app.services.ocr_service import build_empty_passport_json, normalize_date, run_ocr_with_boxes
+from app.services.ocr_service import (
+    build_empty_passport_json,
+    ensure_image_orientation,
+    normalize_date,
+    run_ocr_with_boxes,
+)
 from app.services.passport_review_service import PASSPORT_FIELD_KEYS
 
 
@@ -474,22 +479,77 @@ def prepare_passport_inference(file_bytes: bytes, file_name: str) -> tuple[str, 
     return image_id, image_path, None
 
 
-def run_passport_ocr_stage(image_path: Path) -> dict[str, Any]:
+def run_passport_orientation_stage(image_path: Path) -> dict[str, Any]:
     service_url = get_passport_ocr_service_url()
     if service_url:
-        return _run_remote_passport_ocr_stage(image_path, service_url=service_url)
+        orientation_url = f"{service_url.rsplit('/', 1)[0]}/orient"
+        payload = {"image_path": str(image_path)}
+        request = urllib.request.Request(
+            orientation_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(
+                request,
+                timeout=get_passport_ocr_service_timeout_seconds(),
+            ) as response:
+                raw_response = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"OCR orientation service error {exc.code}: {error_body}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"OCR orientation service is unavailable: {exc}") from exc
+
+        try:
+            parsed_response = json.loads(raw_response)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("OCR orientation service returned invalid JSON.") from exc
+        if not isinstance(parsed_response, dict) or parsed_response.get("status") != "success":
+            raise RuntimeError(f"OCR orientation service failed: {parsed_response}")
+
+        orientation = parsed_response.get("data")
+        if not isinstance(orientation, dict):
+            raise RuntimeError("OCR orientation service response is missing data.")
+        performance = parsed_response.get("performance")
+        if isinstance(performance, dict):
+            orientation["_performance"] = performance
+        return orientation
+
+    return ensure_image_orientation(image_path, force=True)
+
+
+def run_passport_ocr_stage(image_path: Path, *, auto_rotate: bool | None = None) -> dict[str, Any]:
+    resolved_auto_rotate = (
+        not get_inference_skip_ocr_auto_rotate()
+        if auto_rotate is None
+        else auto_rotate
+    )
+    service_url = get_passport_ocr_service_url()
+    if service_url:
+        return _run_remote_passport_ocr_stage(
+            image_path,
+            service_url=service_url,
+            auto_rotate=resolved_auto_rotate,
+        )
 
     return run_ocr_with_boxes(
         image_path,
-        auto_rotate=not get_inference_skip_ocr_auto_rotate(),
+        auto_rotate=resolved_auto_rotate,
         fast_mode=True,
     )
 
 
-def _run_remote_passport_ocr_stage(image_path: Path, *, service_url: str) -> dict[str, Any]:
+def _run_remote_passport_ocr_stage(
+    image_path: Path,
+    *,
+    service_url: str,
+    auto_rotate: bool,
+) -> dict[str, Any]:
     payload = {
         "image_path": str(image_path),
-        "auto_rotate": not get_inference_skip_ocr_auto_rotate(),
+        "auto_rotate": auto_rotate,
         "fast_mode": True,
     }
     request = urllib.request.Request(

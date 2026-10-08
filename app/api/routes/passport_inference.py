@@ -18,6 +18,7 @@ from app.config import (
     get_inference_upload_dir,
     get_inference_donut_concurrency,
     get_inference_ocr_concurrency,
+    get_inference_skip_ocr_auto_rotate,
     get_log_dir,
     get_passport_inference_api_key,
 )
@@ -35,6 +36,7 @@ from app.services.passport_inference_service import (
     get_inference_image_path,
     prepare_passport_inference,
     run_passport_donut_stage,
+    run_passport_orientation_stage,
     run_passport_ocr_stage,
     store_inference_upload,
 )
@@ -232,7 +234,45 @@ def _safe_append_inference_request_log(**kwargs: object) -> None:
         return
 
 
-def _run_ocr_stage_limited(image_path: Path, *, request_id: str, image_id: str, file_name: str) -> dict[str, object]:
+def _run_orientation_stage_limited(
+    image_path: Path,
+    *,
+    request_id: str,
+    image_id: str,
+    file_name: str,
+) -> dict[str, object]:
+    _safe_append_inference_stage_log(
+        request_id=request_id,
+        stage="orientation_start",
+        image_id=image_id,
+        file_name=file_name,
+    )
+    run_started = perf_counter()
+    result = run_passport_orientation_stage(image_path)
+    performance = result.pop("_performance", {})
+    _safe_append_inference_stage_log(
+        request_id=request_id,
+        stage="orientation_done",
+        image_id=image_id,
+        file_name=file_name,
+        elapsed_ms=(perf_counter() - run_started) * 1000,
+        extra={
+            "rotated": bool(result.get("rotated")),
+            "angle": result.get("angle", 0),
+            "profile": performance if isinstance(performance, dict) else {},
+        },
+    )
+    return result
+
+
+def _run_ocr_stage_limited(
+    image_path: Path,
+    *,
+    request_id: str,
+    image_id: str,
+    file_name: str,
+    auto_rotate: bool | None = None,
+) -> dict[str, object]:
     wait_started = perf_counter()
     _safe_append_inference_stage_log(
         request_id=request_id,
@@ -251,7 +291,7 @@ def _run_ocr_stage_limited(image_path: Path, *, request_id: str, image_id: str, 
             elapsed_ms=wait_duration_ms,
         )
         run_started = perf_counter()
-        result = run_passport_ocr_stage(image_path)
+        result = run_passport_ocr_stage(image_path, auto_rotate=auto_rotate)
         performance = result.pop("_performance", {})
         _safe_append_inference_stage_log(
             request_id=request_id,
@@ -714,25 +754,70 @@ async def upload_passport_inference(request: Request, payload: PassportInference
             )
             result = cached_result
         else:
-            ocr_started = perf_counter()
-            overlay = await asyncio.to_thread(
-                _run_ocr_stage_limited,
-                image_path,
-                request_id=request_id,
-                image_id=image_id,
-                file_name=resolved_file_name,
-            )
-            ocr_duration_ms = round((perf_counter() - ocr_started) * 1000, 2)
+            if not get_inference_skip_ocr_auto_rotate():
+                _safe_append_inference_stage_log(
+                    request_id=request_id,
+                    stage="orientation_wait",
+                    request=request,
+                    image_id=image_id,
+                    file_name=resolved_file_name,
+                )
+                await asyncio.to_thread(
+                    _run_orientation_stage_limited,
+                    image_path,
+                    request_id=request_id,
+                    image_id=image_id,
+                    file_name=resolved_file_name,
+                )
 
-            donut_started = perf_counter()
-            donut_result = await asyncio.to_thread(
-                _run_donut_stage_limited,
-                image_path,
+            parallel_started = perf_counter()
+            _safe_append_inference_stage_log(
                 request_id=request_id,
+                stage="ocr_donut_parallel_start",
+                request=request,
                 image_id=image_id,
                 file_name=resolved_file_name,
             )
-            donut_duration_ms = round((perf_counter() - donut_started) * 1000, 2)
+
+            async def run_ocr_timed() -> tuple[dict[str, object], float]:
+                stage_started = perf_counter()
+                stage_result = await asyncio.to_thread(
+                    _run_ocr_stage_limited,
+                    image_path,
+                    request_id=request_id,
+                    image_id=image_id,
+                    file_name=resolved_file_name,
+                    auto_rotate=False,
+                )
+                return stage_result, round((perf_counter() - stage_started) * 1000, 2)
+
+            async def run_donut_timed() -> tuple[dict[str, object], float]:
+                stage_started = perf_counter()
+                stage_result = await asyncio.to_thread(
+                    _run_donut_stage_limited,
+                    image_path,
+                    request_id=request_id,
+                    image_id=image_id,
+                    file_name=resolved_file_name,
+                )
+                return stage_result, round((perf_counter() - stage_started) * 1000, 2)
+
+            (overlay, ocr_duration_ms), (donut_result, donut_duration_ms) = await asyncio.gather(
+                run_ocr_timed(),
+                run_donut_timed(),
+            )
+            _safe_append_inference_stage_log(
+                request_id=request_id,
+                stage="ocr_donut_parallel_done",
+                request=request,
+                image_id=image_id,
+                file_name=resolved_file_name,
+                elapsed_ms=(perf_counter() - parallel_started) * 1000,
+                extra={
+                    "ocr_duration_ms": ocr_duration_ms,
+                    "donut_duration_ms": donut_duration_ms,
+                },
+            )
             total_duration_ms = round((perf_counter() - total_started) * 1000, 2)
 
             _safe_append_inference_stage_log(

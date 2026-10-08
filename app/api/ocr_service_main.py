@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from app.services.ocr_service import preload_ocr_runtime, run_ocr_with_boxes
+from app.services.ocr_service import ensure_image_orientation, preload_ocr_runtime, run_ocr_with_boxes
 
 
 app = FastAPI(title="Passport OCR Worker API", version="1.0.0")
@@ -21,11 +21,15 @@ class PassportOcrPayload(BaseModel):
     fast_mode: bool = True
 
 
+class PassportOrientationPayload(BaseModel):
+    image_path: str = Field(..., min_length=1)
+
+
 @app.on_event("startup")
 async def preload_ocr_worker_runtime() -> None:
     logger = logging.getLogger(__name__)
     logger.info("Preloading Passport OCR worker runtime")
-    await asyncio.to_thread(preload_ocr_runtime, fast_mode=True, include_orientation=False)
+    await asyncio.to_thread(preload_ocr_runtime, fast_mode=True, include_orientation=True)
     logger.info("Finished preloading Passport OCR worker runtime")
 
 
@@ -67,4 +71,31 @@ async def run_passport_ocr(payload: PassportOcrPayload) -> dict[str, Any]:
         "status": "success",
         "data": overlay,
         "performance": performance,
+    }
+
+
+@app.post("/ocr/orient")
+async def orient_passport_image(payload: PassportOrientationPayload) -> dict[str, Any]:
+    image_path = Path(payload.image_path).expanduser().resolve()
+    if not image_path.exists():
+        raise HTTPException(status_code=404, detail=f"Image not found: {image_path}")
+
+    started = perf_counter()
+    try:
+        orientation = await asyncio.to_thread(ensure_image_orientation, image_path, force=True)
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=f"OCR orientation worker failed: {exc}") from exc
+
+    duration_ms = round((perf_counter() - started) * 1000, 2)
+    logging.getLogger(__name__).info(
+        "Orientation profile image=%s rotated=%s angle=%s duration_ms=%s",
+        image_path.name,
+        orientation.get("rotated"),
+        orientation.get("angle"),
+        duration_ms,
+    )
+    return {
+        "status": "success",
+        "data": orientation,
+        "performance": {"orientation_worker_duration_ms": duration_ms},
     }
