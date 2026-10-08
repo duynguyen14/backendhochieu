@@ -86,6 +86,17 @@ def _add_paddle_cpu_runtime_kwargs(kwargs: dict[str, Any]) -> None:
     kwargs.setdefault("enable_hpi", False)
 
 
+def _get_normalized_paddle_device() -> str:
+    configured_device = get_paddle_ocr_device().strip().lower()
+    if configured_device == "gpu":
+        return "gpu:0"
+    if configured_device == "cuda":
+        return "gpu:0"
+    if configured_device.startswith("cuda:"):
+        return f"gpu:{configured_device.split(':', 1)[1]}"
+    return configured_device or "cpu"
+
+
 def normalize_path(path: Path) -> str:
     return str(path.resolve()).replace("/", "\\").lower()
 
@@ -214,7 +225,7 @@ def _build_pipeline_kwargs(*, fast_mode: bool = False) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "lang": get_ocr_language(),
         "ocr_version": get_paddle_ocr_version(),
-        "device": get_paddle_ocr_device(),
+        "device": _get_normalized_paddle_device(),
         "use_doc_orientation_classify": False if fast_mode else get_paddle_use_doc_orientation_classify(),
         "use_doc_unwarping": False,
         "use_textline_orientation": False if fast_mode else get_paddle_use_textline_orientation(),
@@ -255,7 +266,7 @@ def _build_doc_preprocessor_kwargs() -> dict[str, Any]:
     os.environ["PADDLE_PDX_MODEL_SOURCE"] = get_paddle_model_source()
 
     kwargs: dict[str, Any] = {
-        "device": get_paddle_ocr_device(),
+        "device": _get_normalized_paddle_device(),
         "use_doc_orientation_classify": True,
         "use_doc_unwarping": False,
     }
