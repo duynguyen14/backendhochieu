@@ -229,6 +229,22 @@ def get_inference_skip_ocr_auto_rotate() -> bool:
     return get_bool_env("INFERENCE_SKIP_OCR_AUTO_ROTATE", False)
 
 
+def get_passport_ocr_service_url() -> str:
+    return get_env_value("PASSPORT_OCR_SERVICE_URL")
+
+
+def get_passport_ocr_service_timeout_seconds() -> float:
+    return max(1.0, float(get_env_value("PASSPORT_OCR_SERVICE_TIMEOUT_SECONDS", "120")))
+
+
+def get_ocr_service_host() -> str:
+    return get_env_value("OCR_SERVICE_HOST", "127.0.0.1")
+
+
+def get_ocr_service_port() -> int:
+    return int(get_env_value("OCR_SERVICE_PORT", "8124"))
+
+
 def get_passport_inference_api_key() -> str:
     return get_env_value("PASSPORT_INFERENCE_API_KEY") or get_env_value("API_KEY", "")
 

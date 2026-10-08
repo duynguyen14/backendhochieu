@@ -6,6 +6,8 @@ import hashlib
 import json
 import re
 import threading
+import urllib.error
+import urllib.request
 from io import BytesIO
 from pathlib import Path
 from time import perf_counter
@@ -26,6 +28,8 @@ from app.config import (
     get_donut_use_dynamic_quantization,
     get_inference_skip_ocr_auto_rotate,
     get_inference_upload_dir,
+    get_passport_ocr_service_timeout_seconds,
+    get_passport_ocr_service_url,
 )
 from app.services.ocr_service import build_empty_passport_json, normalize_date, run_ocr_with_boxes
 from app.services.passport_review_service import PASSPORT_FIELD_KEYS
@@ -404,11 +408,53 @@ def prepare_passport_inference(file_bytes: bytes, file_name: str) -> tuple[str, 
 
 
 def run_passport_ocr_stage(image_path: Path) -> dict[str, Any]:
+    service_url = get_passport_ocr_service_url()
+    if service_url:
+        return _run_remote_passport_ocr_stage(image_path, service_url=service_url)
+
     return run_ocr_with_boxes(
         image_path,
         auto_rotate=not get_inference_skip_ocr_auto_rotate(),
         fast_mode=True,
     )
+
+
+def _run_remote_passport_ocr_stage(image_path: Path, *, service_url: str) -> dict[str, Any]:
+    payload = {
+        "image_path": str(image_path),
+        "auto_rotate": not get_inference_skip_ocr_auto_rotate(),
+        "fast_mode": True,
+    }
+    request = urllib.request.Request(
+        service_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=get_passport_ocr_service_timeout_seconds()) as response:
+            raw_response = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"OCR service error {exc.code}: {error_body}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"OCR service is unavailable: {exc}") from exc
+
+    try:
+        parsed_response = json.loads(raw_response)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("OCR service returned invalid JSON.") from exc
+
+    if not isinstance(parsed_response, dict):
+        raise RuntimeError("OCR service returned an invalid response shape.")
+    if parsed_response.get("status") != "success":
+        raise RuntimeError(f"OCR service failed: {parsed_response.get('detail') or parsed_response}")
+
+    overlay = parsed_response.get("data")
+    if not isinstance(overlay, dict):
+        raise RuntimeError("OCR service response is missing data.")
+
+    return overlay
 
 
 def run_passport_donut_stage(image_path: Path) -> dict[str, Any]:
