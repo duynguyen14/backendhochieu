@@ -10,6 +10,7 @@ from inspect import Parameter, signature
 from datetime import datetime
 from pathlib import Path
 from statistics import median
+from time import perf_counter
 from typing import Any
 
 import cv2
@@ -592,20 +593,45 @@ def _segment_line_into_words(line_entry: dict[str, Any]) -> list[dict[str, Any]]
     ]
 
 
-def _extract_ocr_result(image_path: Path, *, auto_rotate: bool = True, fast_mode: bool = False) -> dict[str, Any]:
+def _extract_ocr_result(
+    image_path: Path,
+    *,
+    auto_rotate: bool = True,
+    fast_mode: bool = False,
+    include_performance: bool = False,
+) -> dict[str, Any]:
+    total_started = perf_counter()
+    orientation_started = perf_counter()
     if auto_rotate:
         ensure_image_orientation(image_path)
+    orientation_ms = (perf_counter() - orientation_started) * 1000
+
+    pipeline_started = perf_counter()
     pipeline = _get_fast_ocr_pipeline() if fast_mode else _get_ocr_pipeline()
+    pipeline_resolve_ms = (perf_counter() - pipeline_started) * 1000
+
+    predict_started = perf_counter()
     result = pipeline.predict(str(image_path))
+    predict_ms = (perf_counter() - predict_started) * 1000
+    postprocess_started = perf_counter()
     if not result:
         width, height = _get_image_size(image_path)
-        return {
+        empty_result: dict[str, Any] = {
             "image_width": width,
             "image_height": height,
             "rotation_applied": 0,
             "lines": [],
             "words": [],
         }
+        if include_performance:
+            empty_result["_performance"] = {
+                "orientation_ms": round(orientation_ms, 2),
+                "pipeline_resolve_ms": round(pipeline_resolve_ms, 2),
+                "predict_ms": round(predict_ms, 2),
+                "postprocess_ms": round((perf_counter() - postprocess_started) * 1000, 2),
+                "total_profiled_ms": round((perf_counter() - total_started) * 1000, 2),
+            }
+        return empty_result
 
     item = result[0]
     raw_line_entries: list[dict[str, Any]] = []
@@ -797,13 +823,24 @@ def _extract_ocr_result(image_path: Path, *, auto_rotate: bool = True, fast_mode
         line["word_ids"] = words_by_line_id.get(str(line["id"]), [])
 
     width, height = _get_image_size(image_path)
-    return {
+    extracted_result: dict[str, Any] = {
         "image_width": width,
         "image_height": height,
         "rotation_applied": 0,
         "lines": lines,
         "words": words,
     }
+    if include_performance:
+        extracted_result["_performance"] = {
+            "orientation_ms": round(orientation_ms, 2),
+            "pipeline_resolve_ms": round(pipeline_resolve_ms, 2),
+            "predict_ms": round(predict_ms, 2),
+            "postprocess_ms": round((perf_counter() - postprocess_started) * 1000, 2),
+            "total_profiled_ms": round((perf_counter() - total_started) * 1000, 2),
+            "line_count": len(lines),
+            "word_count": len(words),
+        }
+    return extracted_result
 
 
 def run_ocr(image_path: Path, *, auto_rotate: bool = True, fast_mode: bool = False) -> str:
@@ -811,9 +848,23 @@ def run_ocr(image_path: Path, *, auto_rotate: bool = True, fast_mode: bool = Fal
     return _ocr_result_to_text(extracted)
 
 
-def run_ocr_with_boxes(image_path: Path, *, auto_rotate: bool = True, fast_mode: bool = False) -> dict[str, object]:
-    extracted = _extract_ocr_result(image_path, auto_rotate=auto_rotate, fast_mode=fast_mode)
-    return _ocr_result_to_overlay(extracted)
+def run_ocr_with_boxes(
+    image_path: Path,
+    *,
+    auto_rotate: bool = True,
+    fast_mode: bool = False,
+    include_performance: bool = False,
+) -> dict[str, object]:
+    extracted = _extract_ocr_result(
+        image_path,
+        auto_rotate=auto_rotate,
+        fast_mode=fast_mode,
+        include_performance=include_performance,
+    )
+    overlay = _ocr_result_to_overlay(extracted)
+    if include_performance and isinstance(extracted.get("_performance"), dict):
+        overlay["_performance"] = extracted["_performance"]
+    return overlay
 
 
 def _ocr_result_to_text(extracted: dict[str, Any]) -> str:

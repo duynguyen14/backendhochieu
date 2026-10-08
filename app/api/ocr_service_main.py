@@ -47,14 +47,24 @@ async def run_passport_ocr(payload: PassportOcrPayload) -> dict[str, Any]:
             image_path,
             auto_rotate=payload.auto_rotate,
             fast_mode=payload.fast_mode,
+            include_performance=True,
         )
     except Exception as exc:  # pragma: no cover
         raise HTTPException(status_code=500, detail=f"OCR worker failed: {exc}") from exc
 
+    total_duration_ms = round((perf_counter() - started) * 1000, 2)
+    performance = overlay.pop("_performance", {})
+    if not isinstance(performance, dict):
+        performance = {}
+    performance["ocr_worker_duration_ms"] = total_duration_ms
+    logging.getLogger(__name__).info(
+        "OCR profile image=%s performance=%s",
+        image_path.name,
+        performance,
+    )
+
     return {
         "status": "success",
         "data": overlay,
-        "performance": {
-            "ocr_worker_duration_ms": round((perf_counter() - started) * 1000, 2),
-        },
+        "performance": performance,
     }

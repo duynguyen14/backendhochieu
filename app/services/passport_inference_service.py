@@ -312,16 +312,24 @@ def _decode_donut_sequence(processor: Any, sequence: str) -> tuple[dict[str, str
 
 
 def _run_donut_inference(image_path: Path) -> dict[str, Any]:
+    total_started = perf_counter()
     runtime = _get_donut_runtime()
     torch = runtime["torch"]
     processor = runtime["processor"]
     model = runtime["model"]
     device = runtime["device"]
 
+    def synchronize_cuda() -> None:
+        if str(device).startswith("cuda") and torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+    image_load_started = perf_counter()
     with Image.open(image_path) as image:
         prepared_image = ImageOps.exif_transpose(image).convert("RGB")
+    image_load_ms = (perf_counter() - image_load_started) * 1000
 
     task_prompt = get_donut_task_prompt()
+    image_preprocess_started = perf_counter()
     pixel_values = processor(
         prepared_image,
         return_tensors="pt",
@@ -329,12 +337,22 @@ def _run_donut_inference(image_path: Path) -> dict[str, Any]:
             "height": get_donut_inference_image_height(),
             "width": get_donut_inference_image_width(),
         },
-    ).pixel_values.to(device)
+    ).pixel_values
+    image_preprocess_ms = (perf_counter() - image_preprocess_started) * 1000
+
+    tokenize_started = perf_counter()
     decoder_input_ids = processor.tokenizer(
         task_prompt,
         add_special_tokens=False,
         return_tensors="pt",
-    ).input_ids.to(device)
+    ).input_ids
+    tokenize_ms = (perf_counter() - tokenize_started) * 1000
+
+    transfer_started = perf_counter()
+    pixel_values = pixel_values.to(device)
+    decoder_input_ids = decoder_input_ids.to(device)
+    synchronize_cuda()
+    transfer_to_device_ms = (perf_counter() - transfer_started) * 1000
 
     generation_kwargs: dict[str, Any] = {
         "decoder_input_ids": decoder_input_ids,
@@ -349,18 +367,54 @@ def _run_donut_inference(image_path: Path) -> dict[str, Any]:
         generation_kwargs["bad_words_ids"] = [[processor.tokenizer.unk_token_id]]
 
     with torch.inference_mode():
+        synchronize_cuda()
+        encoder_started = perf_counter()
+        encoder_outputs = model.get_encoder()(
+            pixel_values=pixel_values,
+            return_dict=True,
+        )
+        synchronize_cuda()
+        encoder_ms = (perf_counter() - encoder_started) * 1000
+
+        decoder_started = perf_counter()
         generated_sequences = model.generate(
-            pixel_values,
+            encoder_outputs=encoder_outputs,
             **generation_kwargs,
         )
+        synchronize_cuda()
+        decoder_ms = (perf_counter() - decoder_started) * 1000
 
+    decode_started = perf_counter()
     decoded_sequence = processor.batch_decode(generated_sequences, skip_special_tokens=False)[0]
+    batch_decode_ms = (perf_counter() - decode_started) * 1000
+
+    parse_started = perf_counter()
     editable_fields, parsed_payload = _decode_donut_sequence(processor, decoded_sequence)
+    parse_ms = (perf_counter() - parse_started) * 1000
+    sequence_token_count = int(generated_sequences.shape[-1])
+    prompt_token_count = int(decoder_input_ids.shape[-1])
     return {
         "raw_sequence": decoded_sequence,
         "editable_fields": editable_fields,
         "parsed_payload": parsed_payload,
         "task_prompt": task_prompt,
+        "performance": {
+            "image_load_ms": round(image_load_ms, 2),
+            "image_preprocess_ms": round(image_preprocess_ms, 2),
+            "tokenize_ms": round(tokenize_ms, 2),
+            "transfer_to_device_ms": round(transfer_to_device_ms, 2),
+            "encoder_ms": round(encoder_ms, 2),
+            "decoder_generate_ms": round(decoder_ms, 2),
+            "batch_decode_ms": round(batch_decode_ms, 2),
+            "parse_ms": round(parse_ms, 2),
+            "total_profiled_ms": round((perf_counter() - total_started) * 1000, 2),
+            "prompt_token_count": prompt_token_count,
+            "sequence_token_count": sequence_token_count,
+            "max_new_tokens": get_donut_max_new_tokens(),
+            "input_width": get_donut_inference_image_width(),
+            "input_height": get_donut_inference_image_height(),
+            "device": str(device),
+        },
     }
 
 
@@ -454,6 +508,10 @@ def _run_remote_passport_ocr_stage(image_path: Path, *, service_url: str) -> dic
     if not isinstance(overlay, dict):
         raise RuntimeError("OCR service response is missing data.")
 
+    performance = parsed_response.get("performance")
+    if isinstance(performance, dict):
+        overlay["_performance"] = performance
+
     return overlay
 
 
@@ -509,6 +567,7 @@ def run_passport_inference(file_bytes: bytes, file_name: str) -> dict[str, Any]:
     total_started = perf_counter()
     ocr_started = perf_counter()
     overlay = run_passport_ocr_stage(image_path)
+    overlay.pop("_performance", None)
     ocr_duration_ms = round((perf_counter() - ocr_started) * 1000, 2)
 
     donut_started = perf_counter()

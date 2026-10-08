@@ -161,6 +161,8 @@ def _append_inference_stage_log(
         console_parts.append(f"image_id={image_id}")
     if elapsed_ms is not None:
         console_parts.append(f"elapsed_ms={round(float(elapsed_ms), 2)}")
+    if extra:
+        console_parts.append(f"extra={json.dumps(extra, ensure_ascii=False, separators=(',', ':'))}")
     print(" ".join(console_parts), flush=True)
 
     log_file_path = _get_inference_stage_log_file_path(current_time)
@@ -250,6 +252,7 @@ def _run_ocr_stage_limited(image_path: Path, *, request_id: str, image_id: str, 
         )
         run_started = perf_counter()
         result = run_passport_ocr_stage(image_path)
+        performance = result.pop("_performance", {})
         _safe_append_inference_stage_log(
             request_id=request_id,
             stage="ocr_done",
@@ -259,6 +262,7 @@ def _run_ocr_stage_limited(image_path: Path, *, request_id: str, image_id: str, 
             extra={
                 "word_count": len(result.get("words", [])),
                 "line_count": len(result.get("lines", [])),
+                "profile": performance if isinstance(performance, dict) else {},
             },
         )
         return result
@@ -301,6 +305,7 @@ def _run_donut_stage_limited(image_path: Path, *, request_id: str, image_id: str
         )
         run_started = perf_counter()
         result = run_passport_donut_stage(image_path)
+        performance = result.get("performance", {})
         _safe_append_inference_stage_log(
             request_id=request_id,
             stage="donut_done",
@@ -309,6 +314,7 @@ def _run_donut_stage_limited(image_path: Path, *, request_id: str, image_id: str
             elapsed_ms=(perf_counter() - run_started) * 1000,
             extra={
                 "editable_field_count": len(result.get("editable_fields", {})),
+                "profile": performance if isinstance(performance, dict) else {},
             },
         )
         return result
