@@ -89,12 +89,12 @@ def _add_paddle_cpu_runtime_kwargs(kwargs: dict[str, Any]) -> None:
 
 def _get_normalized_paddle_device() -> str:
     configured_device = get_paddle_ocr_device().strip().lower()
-    if configured_device == "gpu":
+    if configured_device.startswith("gpu"):
         return "gpu"
-    if configured_device == "cuda":
+    if configured_device.startswith("cuda"):
         return "gpu"
-    if configured_device.startswith("cuda:"):
-        return "gpu"
+    if configured_device.startswith("cpu"):
+        return "cpu"
     return configured_device or "cpu"
 
 

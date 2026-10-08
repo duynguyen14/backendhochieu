@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -33,6 +34,11 @@ def _configure_logging() -> Path:
 
 
 def main() -> None:
+    os.environ.setdefault("PADDLE_OCR_DEVICE", "gpu")
+    os.environ.setdefault("INFERENCE_SKIP_OCR_AUTO_ROTATE", "true")
+    os.environ.setdefault("OCR_SERVICE_HOST", "127.0.0.1")
+    os.environ.setdefault("OCR_SERVICE_PORT", "8124")
+
     log_file_path = _configure_logging()
     host = get_ocr_service_host()
     port = get_ocr_service_port()
