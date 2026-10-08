@@ -8,6 +8,7 @@ import re
 import threading
 import urllib.error
 import urllib.request
+from contextlib import nullcontext
 from io import BytesIO
 from pathlib import Path
 from time import perf_counter
@@ -25,6 +26,7 @@ from app.config import (
     get_donut_model_dir,
     get_donut_processor_dir,
     get_donut_task_prompt,
+    get_donut_use_fp16,
     get_donut_use_dynamic_quantization,
     get_inference_skip_ocr_auto_rotate,
     get_inference_upload_dir,
@@ -120,6 +122,7 @@ def _get_donut_runtime() -> dict[str, Any]:
             torch.set_num_interop_threads(1)
 
         device = _resolve_donut_device(torch)
+        use_fp16 = get_donut_use_fp16() and device.startswith("cuda")
         processor_dir = _get_processor_dir(model_dir)
         processor = DonutProcessor.from_pretrained(str(processor_dir), local_files_only=True)
         try:
@@ -149,6 +152,8 @@ def _get_donut_runtime() -> dict[str, Any]:
             "processor": processor,
             "model": model,
             "device": device,
+            "use_fp16": use_fp16,
+            "compute_dtype": "float16_autocast" if use_fp16 else "float32",
             "model_dir": str(model_dir),
             "processor_dir": str(processor_dir),
             "cpu_threads": cpu_threads,
@@ -318,6 +323,7 @@ def _run_donut_inference(image_path: Path) -> dict[str, Any]:
     processor = runtime["processor"]
     model = runtime["model"]
     device = runtime["device"]
+    use_fp16 = bool(runtime["use_fp16"])
 
     def synchronize_cuda() -> None:
         if str(device).startswith("cuda") and torch.cuda.is_available():
@@ -366,7 +372,12 @@ def _run_donut_inference(image_path: Path) -> dict[str, Any]:
     if processor.tokenizer.unk_token_id is not None:
         generation_kwargs["bad_words_ids"] = [[processor.tokenizer.unk_token_id]]
 
-    with torch.inference_mode():
+    precision_context = (
+        torch.autocast(device_type="cuda", dtype=torch.float16)
+        if use_fp16
+        else nullcontext()
+    )
+    with torch.inference_mode(), precision_context:
         synchronize_cuda()
         encoder_started = perf_counter()
         encoder_outputs = model.get_encoder()(
@@ -414,6 +425,8 @@ def _run_donut_inference(image_path: Path) -> dict[str, Any]:
             "input_width": get_donut_inference_image_width(),
             "input_height": get_donut_inference_image_height(),
             "device": str(device),
+            "fp16_enabled": use_fp16,
+            "compute_dtype": str(runtime["compute_dtype"]),
         },
     }
 

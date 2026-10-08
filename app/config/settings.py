@@ -203,6 +203,10 @@ def get_donut_device() -> str:
     return get_env_value("DONUT_DEVICE", "auto").lower()
 
 
+def get_donut_use_fp16() -> bool:
+    return get_bool_env("DONUT_USE_FP16", False)
+
+
 def get_donut_cache_size() -> int:
     return max(1, int(get_env_value("DONUT_CACHE_SIZE", "32")))
 
