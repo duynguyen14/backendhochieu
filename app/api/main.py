@@ -166,7 +166,10 @@ async def preload_backend_runtime() -> None:
         await asyncio.to_thread(preload_ocr_runtime, fast_mode=True, include_orientation=include_ocr_orientation)
     await asyncio.to_thread(preload_passport_inference_runtime)
     await asyncio.to_thread(preload_passport_portrait_runtime)
-    await asyncio.to_thread(preload_document_type_classifier_runtime)
+    try:
+        await asyncio.to_thread(preload_document_type_classifier_runtime)
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Document type classifier runtime preload skipped: %s", exc)
     try:
         await asyncio.to_thread(preload_passport_face_match_runtime)
     except Exception as exc:  # pragma: no cover
