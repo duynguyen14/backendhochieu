@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -89,11 +90,11 @@ def _add_paddle_cpu_runtime_kwargs(kwargs: dict[str, Any]) -> None:
 def _get_normalized_paddle_device() -> str:
     configured_device = get_paddle_ocr_device().strip().lower()
     if configured_device == "gpu":
-        return "gpu:0"
+        return "gpu"
     if configured_device == "cuda":
-        return "gpu:0"
+        return "gpu"
     if configured_device.startswith("cuda:"):
-        return f"gpu:{configured_device.split(':', 1)[1]}"
+        return "gpu"
     return configured_device or "cpu"
 
 
@@ -221,11 +222,13 @@ def _read_local_model_name(model_dir: Path) -> str | None:
 def _build_pipeline_kwargs(*, fast_mode: bool = False) -> dict[str, Any]:
     _configure_paddle_runtime_environment()
     os.environ["PADDLE_PDX_MODEL_SOURCE"] = get_paddle_model_source()
+    paddle_device = _get_normalized_paddle_device()
+    logging.getLogger(__name__).info("Using PaddleOCR device: %s", paddle_device)
 
     kwargs: dict[str, Any] = {
         "lang": get_ocr_language(),
         "ocr_version": get_paddle_ocr_version(),
-        "device": _get_normalized_paddle_device(),
+        "device": paddle_device,
         "use_doc_orientation_classify": False if fast_mode else get_paddle_use_doc_orientation_classify(),
         "use_doc_unwarping": False,
         "use_textline_orientation": False if fast_mode else get_paddle_use_textline_orientation(),
@@ -264,9 +267,11 @@ def _build_pipeline_kwargs(*, fast_mode: bool = False) -> dict[str, Any]:
 def _build_doc_preprocessor_kwargs() -> dict[str, Any]:
     _configure_paddle_runtime_environment()
     os.environ["PADDLE_PDX_MODEL_SOURCE"] = get_paddle_model_source()
+    paddle_device = _get_normalized_paddle_device()
+    logging.getLogger(__name__).info("Using Paddle doc preprocessor device: %s", paddle_device)
 
     kwargs: dict[str, Any] = {
-        "device": _get_normalized_paddle_device(),
+        "device": paddle_device,
         "use_doc_orientation_classify": True,
         "use_doc_unwarping": False,
     }
